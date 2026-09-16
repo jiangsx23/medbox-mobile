@@ -1,0 +1,17 @@
+{
+  "//": "测试专用：expo/tsconfig.base 用的是 module:preserve + bundler 解析，ts-jest 需要 commonjs。只覆盖必要的几项，其余继承主 tsconfig。",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "node16",
+    "moduleResolution": "node16",
+    "customConditions": null,
+    "target": "ES2022",
+    "lib": ["ESNext"],
+    "types": ["jest", "node"],
+    "noEmit": true,
+    "isolatedModules": true,
+    "rootDir": ".",
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

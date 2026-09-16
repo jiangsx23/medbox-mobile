@@ -1,0 +1,54 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+# ⚠️ android/ 每次 `prebuild --clean` 都会被整个删掉重建，
+#    所以**任何必须长期存在的东西都不能放在里面** —— 尤其是签名密钥。
+#    密钥放在 keys/，见下面的说明。
+/ios
+/android
+
+# ── keys/ 必须提交，不要加到这里来 ──────────────────────────────────────
+# 里面是给 APK 签名用的密钥。安卓要求「覆盖安装的包必须与已装版本同签名」，
+# 密钥一换，新包就装不上去，只能先卸载 —— **卸载会删掉本地数据库**。
+# 这个 App 的数据只存在手机本地、没有云端，删了就是真没了。
+# 所以这把密钥是和数据同等重要的东西，丢了就得从头再来。
+# （它只是本机自用，不发应用商店，所以口令写在 scripts/android-signing.sh 里。）
+
+# 工具链安装日志（脚本本身保留）
+.toolchain/setup.log

@@ -1,0 +1,18 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true
+  },
+  "//": "测试单独用 tsconfig.test.json 检查（它们需要 jest/node 的全局类型，不该混进 App 代码）。expo/tsconfig.base 自带的 exclude 是数组，这里覆盖时要把它那几项一并写上。",
+  "exclude": [
+    "node_modules",
+    "babel.config.js",
+    "metro.config.js",
+    "jest.config.js",
+    "drizzle.config.ts",
+    "android",
+    "ios",
+    "test"
+  ],
+  "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"]
+}
