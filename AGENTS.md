@@ -72,30 +72,35 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 
 把上游的领域规则逐条翻译成 TypeScript 测试（约 45 条）。**这是唯一不该省的工程投入** —— 自动扣减账本是唯一「算错了用户看不出来、还会静默改真实库存」的地方。
 
-| 上游测试 | 行数 | 条数 | 处理 |
-|---|---|---|---|
-| `tests/test_expiry.py` | 69 | 11 | ✅ 可原样翻译 |
-| `tests/test_forecast.py` | 87 | 5 | ⚠️ 2 条纯函数 + 1 条集成测试要重写 |
-| `tests/test_autodose.py` | 409 | 34 | ⚠️ 规则照搬、测试代码重写 |
-| `tests/test_migrate.py` | 180 | 9 | ❌ 网页版专用，作废 |
+| 上游测试 | 行数 | 条数 | 处理 | 状态 |
+|---|---|---|---|---|
+| `tests/test_expiry.py` | 69 | 11 | 原样翻译 | ✅ `test/expiry.test.ts` |
+| `tests/test_forecast.py` | 87 | 5 | 4 条纯函数 + 1 条集成测试重写 | ✅ `test/forecast.test.ts` |
+| `tests/test_autodose.py` | 409 | 34 | 规则照搬、测试代码重写 | ✅ `test/autodose.test.ts` |
+| `tests/test_migrate.py` | 180 | 9 | ❌ 网页版专用，作废 | — |
 
-已落地 55 条（`npx jest`）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字** —— 装机后对着它核，别凭印象。
+**已落地 175 条**（`npx jest`，7 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
+—— 装机后对着它核，别凭印象。
+
+`test/data.test.ts` 与 `test/helpers.ts` 是**额外的**：上游没有对应物，测的是**落库层在真 SQLite 上**
+的往返（外键、NOT NULL、事务、驱动差异）。建库方式见 `test/helpers.ts` 文件头。
 
 ## 当前进度
 
-**M1 代码部分已完成**（commit `4487a1e`，2026-09-16）。`tsc` 干净、55 条测试全过。
-M1 清单第 1–8 项做完；**第 9 项（编译 apk → 装到小米8 → 导入 `all.json` → 对着网页版核数量）卡住**。
+- **M1 代码部分完成**（`4487a1e`）：骨架 + 本地库（关 WAL）+ JSON 导入 + 首页 + 药品列表/详情
+- **M2 完成**（`0666cf2` + `22374f8`）：入库 + 五种库存操作 + 成员管理
+  （含**提前并入的自动扣减结算** —— 这是刻意偏离里程碑顺序，理由见 DESIGN.md §8.4）
+- **M3 的测试补齐**（2026-09-17）：上游 `test_expiry.py`(11) + `test_forecast.py`(5) 全部落地
 
-卡点：**Windows 260 字符路径上限**。报错
-`ninja: error: Stat(...RNGestureHandlerDetectorShadowNode.cpp.o): Filename longer than 260 characters`
-实测该路径 **367 字符** = 项目路径 33 + 编译中间目录 151 + 镜像出来的第二遍路径与源文件 183。
-其中**不可变部分 303 已经超过 260**（`react-native-gesture-handler` 的 Fabric codegen 目录层级所致），
-所以**把项目挪到任何更短的路径都无效** —— 不要在这上面浪费时间。
+`tsc` 干净、**175 条测试全过**。APK 已出并验签
+（`android/app/build/outputs/apk/release/app-release.apk`，61 MB，2026-09-17）。
 
-两条出路：
-- **A（推荐）** 开 Windows 长路径支持：在**管理员**终端跑
-  `reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f`
-  然后重启电脑。一次性、可回退（把 `1` 改回 `0` 再跑一遍）。保留风险：该开关对部分程序要程序自身声明支持才生效，ninja 大概率可以但不保证。
-- **B** 改用 **EAS 云构建**（Linux，无路径长度限制，一定能出包）。代价：需要 Expo 账号、要把源码上传、签名密钥交给云端管。
+### 🔴 唯一还卡着的一件事：M1 清单第 9 项 —— 装机验收
 
-第 9 项一过，**不停下来，直接进 M2**（入库 + 五种库存操作 + 成员管理）。
+`adb devices` 是空的，**手机没插上**。这是唯一能证明「电脑上过 ≠ 手机上过」这一步不成立的办法 ——
+而 DESIGN.md §8.4 记的那个驱动键名 bug 恰好说明了这两个环境**真的不一样**。
+需要：小米8 用 USB 插上、开 USB 调试。
+
+（曾经的 260 字符路径卡点**已解决** —— 换掉 Android SDK 自带的旧 ninja 即可，
+完整步骤与「为什么网上说的挪短路径/云构建在我们这儿全都无效」见 DESIGN.md §8.3。
+重装 SDK 或新增 CMake 版本后**必须重做**，否则报错原样回来。）
