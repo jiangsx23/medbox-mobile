@@ -428,6 +428,62 @@ App 没有这个统一入口，因此：
 8. 底部 4 tab 骨架（成员页 / 设置页可先占位）
 9. 编译 apk，装到小米8 上，导入 `D:\Downloads\all.json`，**对着网页版核数量**
 
+### 8.2 出包流程（实测）
+
+本机工具链已在位，但**每次开新终端都要重设**（没写进系统 PATH）：
+
+```bash
+export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
+export ANDROID_HOME="/d/Android/Sdk"
+export ANDROID_SDK_ROOT="/d/Android/Sdk"
+```
+
+四步，**一步都不能少**：
+
+```bash
+cd /d/Documents/medbox/medbox-mobile
+npx expo prebuild --platform android   # ⚠️ 会整个删掉重建 android/
+bash scripts/android-signing.sh        # ⚠️ 必须紧跟其后（见下）
+cd android && ./gradlew assembleRelease
+```
+
+产物：`android/app/build/outputs/apk/release/app-release.apk`
+
+**为什么第 3 步不能漏**：`prebuild` 会先打印 "Clearing android"，**静默删掉整个 `android/` 目录** —— 里面的签名配置一起没。漏了这一步，出来的是 debug 密钥签名的包，**装到手机上无法覆盖升级**，只能卸载重装 = 本地数据库全丢。
+
+签名密钥放在 `keys/medbox-release.keystore`（**已进 git，别删**），不在 `android/` 里 —— 因为 `android/` 是 gitignore 的，且每次 prebuild 都被删。`scripts/android-signing.sh` 是幂等的补丁脚本，负责把签名配置重新插回去。
+
+**首次构建极慢**（实测 **6 小时 56 分**）：要下载 Android NDK（约 1 GB，落到 `D:\Android\Sdk\ndk\`）并从源码编译全部原生模块。之后是增量构建，快得多。
+
+⚠️ **构建日志不要接 `| tail`** —— 管道的退出码会掩盖 gradle 的真实退出码，失败的构建会显示成 `exited with code 0`。把日志写文件，再单独 `echo $?`。
+
+### 8.3 🔴 已知卡点：Windows 260 字符路径上限
+
+M1 第 9 项卡在这里。报错：
+
+```
+ninja: error: Stat(...RNGestureHandlerDetectorShadowNode.cpp.o): Filename longer than 260 characters
+```
+
+实测该路径 **367 字符**，构成：
+
+| 段 | 长度 |
+|---|---|
+| 项目路径 `D:\Documents\medbox\medbox-mobile` | 33 |
+| 编译中间目录（`.cxx` + CMake 目标目录 + 随机哈希） | 151 |
+| **镜像出来的第二遍项目路径** + 依赖源文件 | 183 |
+
+**不可变部分 303 已经单独超过 260**，所以**挪项目位置、用虚拟盘符、用目录链接全都无效** —— 不要浪费时间试。根因是 `react-native-gesture-handler` 的 Fabric codegen 目录层级（`shared/shadowNodes/react/renderer/components/` 一段就 44 字符）+ CMake 把源文件绝对路径镜像成目录的固有做法，两者叠在一起。
+
+两条出路：
+
+- **A（推荐）** 开 Windows 长路径支持。**管理员**终端跑：
+  ```
+  reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+  ```
+  然后**重启**。一次性、可回退（把 `1` 改回 `0` 再跑一遍）。保留风险：该开关对部分程序需程序自身声明 `longPathAware` 才生效，ninja 大概率可以，但不保证。
+- **B** 改用 **EAS 云构建**（Linux，无路径长度限制，一定能出包）。代价：需要 Expo 账号、源码要上传、签名密钥交云端管。
+
 ---
 
 ## 9. 未决 / 需要澄清
@@ -437,7 +493,7 @@ App 没有这个统一入口，因此：
 | 1 | **「给别人用」的语义** | 按 **A**（别人也用药箱管理自己家的药，各自独立数据）理解并设计。若实际意思是 **B**（别人也能看「我家」的药箱），那属于云端同步（`requirements.md` §5 明确不做），需要重新讨论 |
 | 2 | **App 图标** | 未做。方向：药箱样式，AI 生成 |
 | 3 | **首次切换的时机** | 未定。原则：App 成熟后导一次 JSON 冷切换，之后网页版**封存不再写入** |
-| 4 | **git 初始化** | 未做（M1 时顺便做） |
+| 4 | **git 初始化** | ✅ **已做**（2026-09-16，commit `4487a1e`，M1 代码部分一次提交）。仓库本地身份先用了占位符 `medbox-dev <dev@medbox.local>`，要换成自己的：`git config user.name/user.email` |
 
 ---
 
