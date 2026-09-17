@@ -508,8 +508,14 @@ export function planEdit(
   }
 
   const patch: BatchPatch = { ...next };
-  // 在库且被改成 0 → 一并转「已用完」，守住不变量 4（见函数头注释）
-  if (batch.status === BATCH_IN_STOCK && next.qty === 0) patch.status = BATCH_USED_UP;
+  // 在库批次的状态**显式写出来**，哪怕没变 —— 因为上面那次结算也可能 patch 同一行。
+  // `pushPatch` 是按字段合并、后者覆盖前者，这里不写的话，结算把这一盒扣到 0 时
+  // 留下的 `status: used_up` 会活下来，于是出现「已用完但还有 20 片」。
+  // 实际很难触发（闸门在任何界面渲染前就结算过了），但两处写同一行的字段，
+  // 该由谁定就该由谁写清楚。
+  if (batch.status === BATCH_IN_STOCK) {
+    patch.status = next.qty === 0 ? BATCH_USED_UP : BATCH_IN_STOCK;
+  }
   pushPatch(plan, batch.id, patch);
 
   const changes: string[] = [];

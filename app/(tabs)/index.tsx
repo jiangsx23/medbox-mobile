@@ -23,6 +23,9 @@ import { color, font, radius, screen, space, text, tone } from '../../src/ui/the
 
 type Filter = '' | 'near' | 'expired';
 
+/** 路由里用 `shared` 代表「归属为空」——`ownerId` 是 `null`，塞不进 path。 */
+const SHARED = 'shared';
+
 const HIDDEN_LABEL: Record<Filter, string> = {
   '': '',
   near: '不在「快过期」范围',
@@ -122,7 +125,9 @@ export default function HomeScreen() {
             <View key={g.medicine.id} style={[styles.group, i > 0 && styles.groupDivided]}>
               <Pressable
                 style={styles.groupHead}
-                onPress={() => router.push(`/medicine/${g.medicine.id}`)}
+                onPress={() =>
+                  router.push({ pathname: '/medicine/[id]', params: { id: g.medicine.id } })
+                }
               >
                 <View style={styles.groupTitleRow}>
                   <Text style={styles.generic}>{g.medicine.generic}</Text>
@@ -204,23 +209,34 @@ export default function HomeScreen() {
           <SectionTitle>需补货</SectionTitle>
           <Card>
             {dash.needRestock.map((r) => (
-              <Pressable
-                key={r.medicine.id}
-                style={styles.restockLine}
-                onPress={() => router.push(`/medicine/${r.medicine.id}`)}
-              >
-                <View style={styles.restockMain}>
+              <View key={r.medicine.id} style={styles.restockLine}>
+                <Pressable
+                  style={styles.restockMain}
+                  onPress={() =>
+                    router.push({ pathname: '/medicine/[id]', params: { id: r.medicine.id } })
+                  }
+                >
                   <Text style={styles.generic}>{r.medicine.generic}</Text>
                   <Text style={text.muted}>
                     {formatDose(r.medicine.dailyDose!)} /天
                   </Text>
-                </View>
+                </Pressable>
                 {r.daysOfSupply === 0 ? (
                   <Pill tone={tone.danger} label="已用完 / 无库存" />
                 ) : (
                   <Pill tone={tone.restock} label={`约剩 ${formatDos(r.daysOfSupply)} 天`} />
                 )}
-              </Pressable>
+                {/* 补货是这个 App 里唯一「买回来马上要记」的动作，
+                    所以在这一行直接给入口，不必先进详情页再找按钮 */}
+                <Pressable
+                  style={styles.restockBtn}
+                  onPress={() =>
+                    router.push({ pathname: '/batch/new', params: { medicineId: r.medicine.id } })
+                  }
+                >
+                  <Text style={styles.restockBtnText}>去补货</Text>
+                </Pressable>
+              </View>
             ))}
           </Card>
         </>
@@ -236,10 +252,15 @@ export default function HomeScreen() {
                 <Pressable
                   key={m.name}
                   style={styles.memberPill}
-                  onPress={() => {
-                    // M2 起跳成员页；现在先在首页搜这个名字，效果等价且不用等新页面
-                    setQ(m.name);
-                  }}
+                  onPress={() =>
+                    // M1 时这里只能把名字填进搜索框（成员页还没做）。
+                    // M2 有了成员详情页，点进去能看到「这个人现在在吃什么」——
+                    // 那时长的信息比筛选后的药名列表多。
+                    router.push({
+                      pathname: '/member/[id]',
+                      params: { id: m.ownerId ?? SHARED },
+                    })
+                  }
                 >
                   <Text style={styles.memberPillText}>
                     {m.name}
@@ -249,7 +270,7 @@ export default function HomeScreen() {
               ))}
             </PillRow>
             <Text style={[text.tiny, styles.memberHint]}>
-              点一下按成员筛选；「家庭共用」是没指定归属的药。
+              点一下看这个人名下的药；「家庭共用」是没指定归属的药。
             </Text>
           </Card>
         </>
@@ -368,6 +389,15 @@ const styles = StyleSheet.create({
     paddingVertical: space.sm,
   },
   restockMain: { flex: 1, gap: 1 },
+  restockBtn: {
+    borderWidth: 1,
+    borderColor: color.brandSoft2,
+    backgroundColor: color.brandSoft,
+    borderRadius: radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  restockBtnText: { fontSize: font.tiny, color: color.brandStrong, fontWeight: '700' },
 
   memberPill: {
     borderWidth: 1,

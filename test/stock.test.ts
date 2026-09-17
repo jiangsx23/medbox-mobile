@@ -434,6 +434,27 @@ describe('编辑纠错', () => {
     expect(plan.patches[0].patch.status).toBeUndefined();
   });
 
+  it('结算正要把这一盒扣到 0、用户却把它改成 8 —— 不能留下「已用完但还有 8 片」', () => {
+    // 编辑要先把旧数量结清，那次结算可能把这一盒扣光并标「已用完」；
+    // 两条 patch 落在同一行，合并时用户的数字必须赢，而且状态要跟着回来
+    const plan = planOf(
+      planEdit(ctx(autoMedicine(), [liveBatch(10, 3)]), batch({ id: 10, qty: 3 }), editForm({ qty: '8' })),
+    );
+
+    expect(plan.patches).toHaveLength(1);
+    expect(plan.patches[0].patch).toMatchObject({ qty: 8, status: BATCH_IN_STOCK });
+    assertLedgerMatches(plan, [{ id: 10, before: 3 }]);
+  });
+
+  it('结算扣过这一盒、用户在编辑里改小 —— 以用户填的数字为准', () => {
+    const plan = planOf(
+      planEdit(ctx(autoMedicine(), [liveBatch(10, 20)]), batch({ id: 10, qty: 20 }), editForm({ qty: '5' })),
+    );
+
+    expect(plan.patches[0].patch.qty).toBe(5);
+    assertLedgerMatches(plan, [{ id: 10, before: 20 }]);
+  });
+
   it('数量和单位是必填的，且一次报全', () => {
     const errors = errorsOf(planEdit(ctx(medicine()), batch(), editForm({ qty: '-1', unit: '  ', ownerId: 'abc' })));
     expect(Object.keys(errors).sort()).toEqual(['ownerId', 'qty', 'unit']);

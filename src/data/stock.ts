@@ -100,6 +100,27 @@ export function batchById(db: MedboxDb, batchId: number): Batch | undefined {
 }
 
 /**
+ * 取刚插入那一行的自增 id。
+ *
+ * ⚠️ drizzle 的**两个驱动返回的键名不一样**：expo-sqlite 是 `lastInsertRowId`
+ * （大写 D，App 上跑的是这个），better-sqlite3 是 `lastInsertRowid`（小写 d）。
+ * 两个都认，是为了让落库层能在 better-sqlite3 上被测试到（见 `test/data.test.ts`）——
+ * 否则这条路径只能靠真机试。
+ *
+ * 更要紧的是**取不到就立刻报错**。让 `createdId` 变成 `NaN` 的话，入库事件会带着
+ * 一个非法的 `batch_id` 落库，用户看到的是一句指不到病根的
+ * 「NOT NULL constraint failed: stock_events.batch_id」。
+ */
+function insertedId(res: {
+  lastInsertRowId?: number | bigint;
+  lastInsertRowid?: number | bigint;
+}): number {
+  const v = res.lastInsertRowId ?? res.lastInsertRowid;
+  if (v === undefined) throw new Error('插入批次后拿不到自增 id —— 驱动返回的键名变了？');
+  return Number(v);
+}
+
+/**
  * 落库。**整体一个事务** —— 数量改了却没写事件，就是账实不符（不变量 1），
  * 这种中间状态绝不允许被别的查询看到。
  *
@@ -115,7 +136,7 @@ export function applyPlan(db: MedboxDb, plan: Plan, now: Instant = Date.now()): 
         .insert(batches)
         .values({ ...plan.create, createdAt: now, updatedAt: now })
         .run();
-      createdId = Number(res.lastInsertRowId);
+      createdId = insertedId(res);
     }
 
     for (const { id, patch } of plan.patches) {
@@ -132,10 +153,15 @@ export function applyPlan(db: MedboxDb, plan: Plan, now: Instant = Date.now()): 
     }
 
     for (const e of plan.events) {
+      // null = 刚创建的那一盒（只有入库会这样）。既没指定批次、本次又没新建批次，
+      // 说明方案本身不成立 —— 与其让 SQLite 报一句 NOT NULL，不如在这里说清楚
+      const batchId = e.batchId ?? createdId;
+      if (batchId === null) {
+        throw new Error('方案里有个事件既没指定批次，本次操作也没有新建批次');
+      }
       tx.insert(stockEvents)
         .values({
-          // null = 刚创建的那一盒（只有入库会这样）
-          batchId: e.batchId ?? createdId!,
+          batchId,
           type: e.type,
           deltaQty: e.deltaQty,
           qtyAfter: e.qtyAfter,
