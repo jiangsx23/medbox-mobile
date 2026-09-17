@@ -475,14 +475,82 @@ ninja: error: Stat(...RNGestureHandlerDetectorShadowNode.cpp.o): Filename longer
 
 **不可变部分 303 已经单独超过 260**，所以**挪项目位置、用虚拟盘符、用目录链接全都无效** —— 不要浪费时间试。根因是 `react-native-gesture-handler` 的 Fabric codegen 目录层级（`shared/shadowNodes/react/renderer/components/` 一段就 44 字符）+ CMake 把源文件绝对路径镜像成目录的固有做法，两者叠在一起。
 
-两条出路：
+#### 2026-09-17 实测：本地无解（三条路都堵死，别再试）
 
-- **A（推荐）** 开 Windows 长路径支持。**管理员**终端跑：
-  ```
-  reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
-  ```
-  然后**重启**。一次性、可回退（把 `1` 改回 `0` 再跑一遍）。保留风险：该开关对部分程序需程序自身声明 `longPathAware` 才生效，ninja 大概率可以，但不保证。
-- **B** 改用 **EAS 云构建**（Linux，无路径长度限制，一定能出包）。代价：需要 Expo 账号、源码要上传、签名密钥交云端管。
+**① 开长路径注册表开关 —— 已试，无效。**
+`LongPathsEnabled` 确认已是 `0x1`，重启后重跑 `assembleRelease`，**同一个错，1 分 05 秒照样失败**。
+
+原因是 Windows 的规矩是**两边都要**：系统允许 **＋** 程序自己声明 `longPathAware`。实测本机三个工具**都没声明**（在 exe 里搜不到这个标记）：
+
+| 工具 | 版本 | 声明 longPathAware |
+|---|---|---|
+| `ninja.exe` | 1.10.2 | ❌ |
+| `cmake.exe` | 3.22.1 | ❌ |
+| `clang.exe` | 18.0.2（NDK 27.1） | ❌ |
+
+**② 换新版 CMake（自带新版 ninja）—— 也没用。**
+ninja 官方 issue [#2359](https://github.com/ninja-build/ninja/issues/2359) 里用户实测**最新的 `1.12.0.git` 仍不解决**；修复补丁 [PR #2552](https://github.com/ninja-build/ninja/pull/2552) **至今仍是 open**，维护者明确表示 MAX_PATH 是微软的 bug、**拒绝合入这个绕开方案**。所以装 CMake 4.1.2 拿到的还是修不好的 ninja。
+
+**③ 挪短路径 —— 数学上不可能。**
+把一切压到极致（`subst` 出单字母虚拟盘符 + `buildStagingDirectory` 指到盘根）后，**理论最短仍是 274 字符**，比 260 还多 14：
+
+| 段 | 最短 |
+|---|---|
+| 构建目录 `C:\b\<hash>\arm64-v8a\` | 24 |
+| 目标目录 `rngesturehandler_codegen_autolinked_build\CMakeFiles\react_codegen_rngesturehandler_codegen.dir\` | 96 |
+| 镜像前缀 `C_\` | 3 |
+| 依赖固有路径 + 文件名 | 151 |
+| **合计** | **274** ❌ |
+
+那 151 字符是依赖包自己的路径，谁也改不了 —— 它加上 CMake 的目录命名就 247。**所以网上到处在说的「挪到 `C:\P\` 就好了」在本项目不成立**（那些人的报错路径落在 Gradle 缓存里，成因不同）。社区同类 issue（react-native-screens [#3471](https://github.com/software-mansion/react-native-screens/issues/3471)）确认这是 **NDK 27.x 的已知问题，截至 2025-12 仍未修复**。
+
+#### ✅ 2026-09-17 已解决：换掉 ninja
+
+**根因不是路径太长，是构建工具太老。** `longPathAware` 这个声明 ninja 在
+**2022-12-13** 才加进源码（提交信息：「Add longPathAware manifest to enable long paths on Windows — Fixes: #1900」，
+文件在 `windows/ninja.manifest`）。而 Android SDK 的 CMake 3.22.1 里带的 ninja 是
+**1.10.2（2021 年）**，早于这个修复一年多 —— 所以注册表开关对它无效。
+
+**做法：只把 ninja 换掉，CMake 保持 3.22.1 不动。**
+
+```bash
+# 1. 从 Google 安卓官方源下载新版 CMake（只是拿它里面的 ninja）
+curl -L -o cmake.zip https://dl.google.com/android/repository/cmake-4.1.2-windows.zip
+
+# 2. 取出 ninja.exe（它在压缩包的 bin/ 下）
+unzip -o -j cmake.zip 'bin/ninja.exe'
+
+# 3. 先备份，再替换
+NB=/d/Android/Sdk/cmake/3.22.1/bin
+cp "$NB/ninja.exe" "$NB/ninja.exe.1.10.2.bak"
+cp ninja.exe "$NB/ninja.exe"
+```
+
+**为什么只换 ninja、不整个换成 CMake 4.1.2**：CMake 4.x 不再兼容
+`cmake_minimum_required(VERSION < 3.5)`，而 RN 的原生模块里还有这种老写法，
+整个换会让 configure 阶段直接失败。ninja 是独立可执行文件，新 ninja 读 CMake 3.22
+生成的 `build.ninja` 没有问题。**只换 ninja 是风险最小的做法。**
+
+**验证是否换对了**（不用运行它，直接搜二进制里的标记）：
+
+```bash
+grep -c longPathAware /d/Android/Sdk/cmake/3.22.1/bin/ninja.exe   # 必须是 1，0 就是没换成功
+```
+
+| | `longPathAware` | 版本 |
+|---|---|---|
+| 旧（SDK 自带） | 0 ❌ | 1.10.2（2021） |
+| 新（CMake 4.1.2 自带） | 1 ✅ | 1.12.1（2025-10） |
+
+**换完必须重跑构建才生效**（`build.ninja` 不用删，ninja 自己会重读）。
+
+⚠️ **如果哪天重装 Android SDK 或装了别的 CMake 版本，这一步要重做** —— SDK 更新会把
+`ninja.exe` 换回旧版，报错会一模一样地回来。
+
+#### 其余出路（已不需要，留作备选）
+
+- **A** 改用 **EAS 云构建**（Linux，无路径长度限制）。§1 已认定 iOS 那一步**必须**走 EAS，所以早晚要做，不算浪费。代价：Expo 账号、源码上传、签名密钥要么交云端管要么上传一份（**必须用同一把 `keys/medbox-release.keystore`**，否则将来本地产的包无法覆盖安装）。
+- **B** 装 **WSL2 + Ubuntu** 在本地 Linux 环境编译。全程不外传，但要装 WSL2（需管理员）、Ubuntu、JDK、Android SDK（数 GB），首次编译从头再来（数小时）。
 
 ---
 

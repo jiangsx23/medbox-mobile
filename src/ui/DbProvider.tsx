@@ -21,6 +21,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-native';
 
 import { openMedboxDatabase, isWalDisabled, type MedboxDb } from '../db/client';
+import { settleAll } from '../data/stock';
 import type { CalendarDay } from '../db/schema';
 import { today as todayDay } from '../domain/calendar';
 import { hasAnyData } from '../importer/apply';
@@ -54,12 +55,15 @@ export function useDb(): DbContextValue {
 type Ready = { db: MedboxDb; journalMode: string };
 
 /**
- * 闸门本体。`settle()` 里目前**只做「打开 + 迁移」**这两件 M1 就需要的事。
+ * 闸门本体。每次开门做三件事：**打开 → 结算 → 涨版本号**。
  *
- * M4 的自动扣减结算要插在这里（`settleAll(db, today)`），插进来之后
- * 上面那句「读完闸门之前的数字永不矛盾」才真正成立。
- * 现在还没写，是因为 M1 导入时把 `auto_from` 重设成了导入当天、
- * `auto_accounted` 归零，所以**没有可结算的天数**，跑不跑结果一样。
+ * 顺序不能换。结算放在涨版本号之前，界面才会在「已经是结算后的数字」上重新取数；
+ * 放在之后，首页会先渲染一遍旧数字、下一帧再跳成新数字 —— 用户看到的是
+ * 药莫名其妙少了几片。
+ *
+ * ⚠️ M2 起结算真的会扣数量了（M1 时 `auto_from` 被导入重设成当天，无可结算天数）。
+ * 所以 `settleAll` 失败必须让闸门**卡住**而不是放行 —— 宁可显示错误，
+ * 也不能让界面拿着没结算的数字骗人。
  */
 export function DbProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState<Ready | null>(null);
@@ -78,7 +82,10 @@ export function DbProvider({ children }: { children: ReactNode }) {
         handle = { db: opened.db, journalMode: opened.journalMode };
         setReady(handle);
       }
-      // M4: settleAll(handle.db, todayDay()) —— 结算插在这一行
+      // 结算。幂等，所以冷启动与回前台各跑一次是设计目标而不是浪费。
+      // 必须在 `setVersion` **之前**跑完：版本号一涨，所有界面就会重新取数，
+      // 那时候库存数字必须已经是结算后的。
+      settleAll(handle.db, todayDay());
 
       // 回前台时可能已经跨了午夜，日期要跟着走，否则「今天到期」会算错一天
       setDay(todayDay());

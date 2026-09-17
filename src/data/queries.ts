@@ -9,7 +9,7 @@
  * ⚠️ 所有返回库存数字的函数，都必须在**结算之后**调用（DESIGN.md §7.3）。
  * 界面上不要绕过 `useDb()` 直接查库，否则首页和详情页可能显示不同的数。
  */
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 
 import type { MedboxDb } from '../db/client';
 import type { Batch, CalendarDay, Medicine, Member } from '../db/schema';
@@ -418,6 +418,126 @@ export function medicineDetail(db: MedboxDb, medicineId: number, today: Calendar
 
 export function listMembers(db: MedboxDb): Member[] {
   return db.select().from(members).all().sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+}
+
+/** 该药**最后建的那一盒**（按建档时间，同一时刻按 id）。入库表单的预填来源。 */
+export function lastBatchFor(db: MedboxDb, medicineId: number): Batch | undefined {
+  return db
+    .select()
+    .from(batches)
+    .where(eq(batches.medicineId, medicineId))
+    .all()
+    .sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)[0];
+}
+
+/** 成员详情页的一盒。 */
+export type MemberSubline = {
+  batch: Batch;
+  inStock: boolean;
+  effective: CalendarDay | null;
+  /** 在库时是效期分档；历史行不用它（用批次状态显示） */
+  expiryStatus: ExpiryStatus;
+};
+
+export type MemberGroup = {
+  medicine: Medicine;
+  sublines: MemberSubline[];
+  /** 「在库 34 片 · 2 盒」/「仅历史 1 条」 */
+  totalText: string;
+};
+
+export type MemberDetail = { member: Member | null; groups: MemberGroup[] };
+
+/**
+ * 某位成员名下的药 —— 按药分组、药下逐盒（§3.7）。
+ *
+ * `scope`：`'in_stock'` 只看在库，`'all'` 连历史（已用完/已过期/已丢弃）一起。
+ *
+ * 两处排序，都不显眼但都是刻意的：
+ * - **组间**按组内最早的提醒日，无提醒日的排最后；
+ * - **组内**在库的排在历史前面，各自再按提醒日。
+ *   不这么排的话，一盒早就用完的药会排在还在吃的药上面。
+ */
+export function memberDetail(
+  db: MedboxDb,
+  ownerId: number | null,
+  scope: 'in_stock' | 'all',
+  today: CalendarDay,
+): MemberDetail {
+  const th = getThresholds(db);
+  const member = ownerId === null
+    ? null
+    : db.select().from(members).where(eq(members.id, ownerId)).get() ?? null;
+
+  // ownerId 为 null 时查的是「归属为空」——「家庭共用」不是一个成员记录，就是这个状态
+  const where = ownerId === null
+    ? isNull(batches.ownerId)
+    : eq(batches.ownerId, ownerId);
+
+  const raw = db
+    .select({ batch: batches, medicine: medicines })
+    .from(batches)
+    .innerJoin(medicines, eq(batches.medicineId, medicines.id))
+    .where(where)
+    .all()
+    .filter((r) => scope === 'all' || r.batch.status === BATCH_IN_STOCK);
+
+  const gmap = new Map<number, MemberGroup>();
+  const order: MemberGroup[] = [];
+  for (const { batch, medicine } of raw) {
+    let g = gmap.get(medicine.id);
+    if (!g) {
+      g = { medicine, sublines: [], totalText: '' };
+      gmap.set(medicine.id, g);
+      order.push(g);
+    }
+    g.sublines.push({
+      batch,
+      inStock: batch.status === BATCH_IN_STOCK,
+      effective: effectiveExpiry(batch),
+      expiryStatus: classify(batch, today, th.nearDays),
+    });
+  }
+
+  for (const g of order) {
+    const live = g.sublines.filter((s) => s.inStock);
+    const units = new Map<string, number>();
+    for (const s of live) units.set(s.batch.unit, (units.get(s.batch.unit) ?? 0) + s.batch.qty);
+    if (live.length === 0) {
+      g.totalText = `仅历史 ${g.sublines.length} 条`;
+    } else if (units.size === 1) {
+      g.totalText = `在库 ${[...units.values()][0]} ${[...units.keys()][0]} · ${live.length} 盒`;
+    } else {
+      // 跨单位相加没有意义，那就只说盒数
+      g.totalText = `在库 ${live.length} 盒`;
+    }
+
+    g.sublines.sort((a, b) => {
+      if (a.inStock !== b.inStock) return a.inStock ? -1 : 1;
+      if (a.effective === null && b.effective === null) return a.batch.id - b.batch.id;
+      if (a.effective === null) return 1;
+      if (b.effective === null) return -1;
+      return compareDays(a.effective, b.effective);
+    });
+  }
+
+  order.sort((a, b) => {
+    const ea = earliestOf(a.sublines);
+    const eb = earliestOf(b.sublines);
+    if (ea !== eb) return compareDays(ea, eb);
+    return a.medicine.generic.localeCompare(b.medicine.generic, 'zh');
+  });
+
+  return { member, groups: order };
+}
+
+/** 组内**在库**行里最早的提醒日；一个都没有就是 MAX_DAY（排最后）。 */
+function earliestOf(sublines: MemberSubline[]): CalendarDay {
+  let best = MAX_DAY;
+  for (const s of sublines) {
+    if (s.inStock && s.effective !== null && compareDays(s.effective, best) < 0) best = s.effective;
+  }
+  return best;
 }
 
 /**

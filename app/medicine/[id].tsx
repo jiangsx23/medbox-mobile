@@ -7,21 +7,32 @@
  * 所以「在库」不折叠，直接一盒一张卡（44 条批次里最多的药也就几盒）。
  *
  * ── 与网页版的差别 ───────────────────────────────────────────────────
- * 网页版每盒下面挂一排操作按钮（取用 / 用完 / 标记过期 / 丢弃 / 编辑）。
- * **M1 不做这些** —— 那是 M2「能记药」的内容。所以这里只读不写，
- * 不是为了省事，是这一版本来就只承诺「能查药」。
+ * 网页版把「历史」压成一行行的紧凑列表。这里给每条历史也配了操作按钮 ——
+ * 因为「标记过期」是 M2 的操作里最容易点错的（数量不变，只是不能再吃），
+ * 点错了必须能就地改回来。压成一行就没地方放「恢复在库」了。
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { medicineDetail } from '../../src/data/queries';
 import { BATCH_STATUS_LABELS, EVENT_LABELS } from '../../src/domain/constants';
 import { formatDose } from '../../src/domain/forecast';
 import { toLocalDisplay } from '../../src/domain/instant';
 import { Card, Empty, ExpiryPill, Pill, SectionTitle } from '../../src/ui/components';
+import { BatchOps } from '../../src/ui/stockops';
 import { useQuery } from '../../src/ui/useQuery';
 import { color, font, radius, screen, space, text, tone } from '../../src/ui/theme';
+
+/** 「＋ 再入库一盒」——在库区的收尾动作，也是空状态下的唯一出路。 */
+function IntakeButton({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable style={styles.intakeBtn} onPress={onPress}>
+      <Ionicons name="add" size={16} color={color.brand} />
+      <Text style={styles.intakeText}>再入库一盒</Text>
+    </Pressable>
+  );
+}
 
 export default function MedicineDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -122,6 +133,9 @@ export default function MedicineDetailScreen() {
       {d.inStock.length === 0 ? (
         <Card>
           <Text style={text.muted}>暂无在库。</Text>
+          <View style={styles.mt}>
+            <IntakeButton onPress={() => router.push({ pathname: '/batch/new', params: { medicineId } })} />
+          </View>
         </Card>
       ) : (
         d.inStock.map((r) => {
@@ -154,18 +168,25 @@ export default function MedicineDetailScreen() {
                 {b.location ? <Text style={styles.locChip}>{b.location}</Text> : null}
               </View>
               {b.notes ? <Text style={[text.muted, styles.mt]}>{b.notes}</Text> : null}
+
+              {/* 六个操作：取用 / 用完 / 丢弃 / 标记过期 / 编辑（在库态少「恢复在库」） */}
+              <BatchOps batch={b} />
             </Card>
           );
         })
       )}
 
+      {d.inStock.length > 0 ? (
+        <IntakeButton onPress={() => router.push({ pathname: '/batch/new', params: { medicineId } })} />
+      ) : null}
+
       {/* ── 历史 ─────────────────────────────────────────────────── */}
       {d.history.length > 0 && (
         <>
           <SectionTitle>历史（已用完 / 已过期 / 已丢弃）</SectionTitle>
-          <Card>
-            {d.history.map((b, i) => (
-              <View key={b.id} style={[styles.histRow, i > 0 && styles.histDivided]}>
+          {d.history.map((b) => (
+            <Card key={b.id} style={styles.gap}>
+              <View style={styles.line}>
                 <Pill tone={tone.gray} label={BATCH_STATUS_LABELS[b.status] ?? b.status} />
                 <Text style={styles.histQty}>
                   {formatDose(b.qty)} {b.unit}
@@ -175,8 +196,11 @@ export default function MedicineDetailScreen() {
                   {b.openedAt ? `（${b.openedAt} 拆封）` : ''}
                 </Text>
               </View>
-            ))}
-          </Card>
+              {/* 已用完/已丢弃的盒数量是 0，恢复在库会被拒 —— 这里只留「编辑」，
+                  顺手把「数量是 0 就改不回去」这条规矩写在按钮旁边 */}
+              <BatchOps batch={b} />
+            </Card>
+          ))}
         </>
       )}
 
@@ -211,8 +235,8 @@ export default function MedicineDetailScreen() {
       </Card>
 
       <Text style={styles.footHint}>
-        <Ionicons name="information-circle-outline" size={12} color={color.muted} /> 入库、取用、
-        用完、丢弃等操作会在下一版加进来。
+        <Ionicons name="information-circle-outline" size={12} color={color.muted} /> 每次改动都会
+        留下一条记录，历史不能修改，只能追加。
       </Text>
     </ScrollView>
   );
@@ -262,18 +286,31 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
 
-  histRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm },
-  histDivided: { borderTopWidth: 1, borderTopColor: color.lineSoft },
   histQty: { fontSize: font.small, fontWeight: '600', color: color.ink },
   histDate: { flex: 1, textAlign: 'right' },
 
   evRow: { paddingVertical: space.sm },
+  histDivided: { borderTopWidth: 1, borderTopColor: color.lineSoft },
   evTop: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   evTime: { fontSize: font.tiny, color: color.muted },
   evType: { fontSize: font.small, color: color.ink, fontWeight: '600' },
   evDelta: { fontSize: font.small, fontWeight: '700' },
   evMinus: { color: tone.restock.text },
   evPlus: { color: tone.ok.text },
+
+  intakeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.xs,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: color.brandSoft2,
+    borderRadius: radius.lg,
+    paddingVertical: 12,
+    marginTop: space.sm,
+  },
+  intakeText: { fontSize: font.small, color: color.brand, fontWeight: '600' },
 
   footHint: { fontSize: font.tiny, color: color.muted, textAlign: 'center', marginTop: space.xl },
 });
