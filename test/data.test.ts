@@ -7,24 +7,10 @@
  * 「ledger → 成对 UPDATE 两个列」三件事绑到同一个事务里。绑错了的表现是
  * **库存数字和时间线对不上** —— 用户看不出来，但从此账本就是错的。
  *
- * ── 为什么用 better-sqlite3 而不是 expo-sqlite ─────────────────────────
- * expo-sqlite 只能在设备/模拟器里跑。better-sqlite3 的关键优点是**同步 API**，
- * 与 expo-sqlite 形状一致：`db.transaction((tx) => { tx.insert(...).run() })`。
- * `drizzle-orm/sqlite-proxy` 那条路人尽皆知地走不通 —— 它是异步的，
- * 而 `applyPlan` 依赖同步事务。
- *
- * 所以这个文件测的是**真的建表 SQL**（`drizzle/*.sql`，与 App 上跑的是同一份）
- * 和**真的 SQL 往返**，只把驱动换掉。没测到的只剩 expo-sqlite 自身的行为。
- *
- * `drizzle-orm/expo-sqlite` 与 `drizzle-orm/better-sqlite3` 的实例
- * 运行时形状相同、类型不同，所以在边界上做一次 cast —— 这是这个文件里
- * 唯一一处类型妥协，代价换取「落库层不再是无测试的代码」。
+ * 怎么把库建起来（真 SQLite、跑 App 同一份迁移 SQL、为什么用 better-sqlite3
+ * 而不是 expo-sqlite）见 `test/helpers.ts` 的文件头。
  */
-import Database from 'better-sqlite3';
 import { eq } from 'drizzle-orm';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 
 import { deleteMember, ownedMedicineCount } from '../src/data/members';
 import {
@@ -40,80 +26,28 @@ import {
   usedUp,
 } from '../src/data/stock';
 import type { MedboxDb } from '../src/db/client';
-import * as schema from '../src/db/schema';
 import { batches, medicines, members, stockEvents } from '../src/db/schema';
 import { addDays } from '../src/domain/calendar';
 import { BATCH_IN_STOCK } from '../src/domain/constants';
+import { addBatch, addMedicine, freshDb, insertId } from './helpers';
 
 const TODAY = '2026-09-14';
 const NOW = Date.UTC(2026, 8, 14, 4, 0, 0);
-const DRIZZLE_DIR = join(__dirname, '..', 'drizzle');
 
-// ── 搭一个真库 ─────────────────────────────────────────────────────────
+// ── 造数据 ─────────────────────────────────────────────────────────────
 
-/**
- * 建一个内存库，跑**与 App 同一份**迁移 SQL。
- *
- * 直接用 `drizzle/*.sql` 而不是 `drizzle-kit push`：这样 schema 改错、
- * 迁移文件没重新生成，这个测试会立刻挂 —— 相当于顺手校验了两者一致。
- */
-function freshDb(): MedboxDb {
-  const sqlite = new Database(':memory:');
-  const files = readdirSync(DRIZZLE_DIR)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-  for (const f of files) sqlite.exec(readFileSync(join(DRIZZLE_DIR, f), 'utf8'));
-  // 外键默认是关的。App 里开（client.ts），这里也要开 ——
-  // 否则「事件指向不存在的批次」这类错误在测试里看不见
-  sqlite.pragma('foreign_keys = ON');
-  return drizzle(sqlite, { schema }) as unknown as MedboxDb;
-}
-
-/**
- * 造数据用：取刚插入那一行的自增 id。
- *
- * 与 `src/data/stock.ts` 里那个 `insertedId` 同样的两个键名都认 —— 那边有完整解释。
- * 这里单独写一份，是为了**证明**落库层自己处理了驱动差异：如果把 `applyPlan`
- * 里的兼容去掉，入库测试会立刻以 `NOT NULL constraint failed` 挂掉。
- */
-function insertId(res: {
-  lastInsertRowId?: number | bigint;
-  lastInsertRowid?: number | bigint;
-}): number {
-  const v = res.lastInsertRowId ?? res.lastInsertRowid;
-  if (v === undefined) throw new Error('拿不到自增 id —— 驱动返回的键名又变了');
-  return Number(v);
-}
-
-function med(db: MedboxDb, over: Partial<typeof medicines.$inferInsert> = {}): number {
-  return insertId(
-    db
-      .insert(medicines)
-      .values({ generic: '测试药', unit: '片', createdAt: NOW, ...over })
-      .run(),
-  );
+/** 薄的本地包装：把本文件的基准时刻 `NOW` 绑上，调用点就不用到处传。 */
+function med(db: MedboxDb, over: Partial<Parameters<typeof addMedicine>[2]> = {}): number {
+  return addMedicine(db, NOW, over);
 }
 
 function box(
   db: MedboxDb,
   medicineId: number,
   qty: number,
-  over: Partial<typeof batches.$inferInsert> = {},
+  over: Partial<Parameters<typeof addBatch>[4]> = {},
 ): number {
-  return insertId(
-    db
-      .insert(batches)
-      .values({
-        medicineId,
-        qty,
-        unit: '片',
-        status: BATCH_IN_STOCK,
-        createdAt: NOW,
-        updatedAt: NOW,
-        ...over,
-      })
-      .run(),
-  );
+  return addBatch(db, NOW, medicineId, qty, over);
 }
 
 /** 开着自动扣减、起算日往回数 `days` 天、每日 1 片的药。 */
