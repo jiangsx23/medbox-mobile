@@ -94,14 +94,25 @@ export default function MedicinesScreen() {
             hint={
               q || category
                 ? '换个词试试，或点上面的「全部」取消类别筛选。'
-                : '从网页版导入数据后，档案会一次装好。'
+                : '点下面的「新建药品」登记一种；或者从网页版导入数据，档案会一次装好。'
             }
           />
         }
         renderItem={({ item }) => (
           <MedicineRow item={item} onPress={() => router.push(`/medicine/${item.medicine.id}`)} />
         )}
-        ListFooterComponent={rows.length > 0 ? <Text style={styles.footer}>{footer}</Text> : null}
+        ListFooterComponent={
+          <View>
+            {rows.length > 0 ? <Text style={styles.footer}>{footer}</Text> : null}
+            {/* 放在页脚而不是固定在底部：药有 37 种，固定在底部会一直压着列表，
+                而「新建」是个偶尔才用一次的动作。页脚既在列表末尾顺手的位置，
+                空列表时它也照样出现 —— 那正是用户第一次进来最需要它的时刻。 */}
+            <Pressable style={styles.addBtn} onPress={() => router.push('/medicine/new')}>
+              <Ionicons name="add" size={16} color={color.brand} />
+              <Text style={styles.addText}>新建药品</Text>
+            </Pressable>
+          </View>
+        }
       />
     </View>
   );
@@ -213,4 +224,18 @@ const styles = StyleSheet.create({
   qty: { fontSize: font.small, fontWeight: '700', color: color.ink },
   qtyOut: { color: color.muted, fontWeight: '600' },
   footer: { textAlign: 'center', fontSize: font.tiny, color: color.muted, paddingVertical: space.md },
+
+  addBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.xs,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: color.brandSoft2,
+    borderRadius: radius.lg,
+    paddingVertical: 12,
+    marginTop: space.sm,
+  },
+  addText: { fontSize: font.small, color: color.brand, fontWeight: '600' },
 });

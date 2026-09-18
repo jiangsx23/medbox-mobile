@@ -12,7 +12,7 @@
  */
 import { and, eq, gt } from 'drizzle-orm';
 
-import type { MedboxDb } from '../db/client';
+import type { Executor, MedboxDb } from '../db/client';
 import type { Batch, CalendarDay, Instant } from '../db/schema';
 import { batches, medicines, stockEvents } from '../db/schema';
 import type { AutoBatch } from '../domain/autodose';
@@ -111,7 +111,7 @@ export function batchById(db: MedboxDb, batchId: number): Batch | undefined {
  * 一个非法的 `batch_id` 落库，用户看到的是一句指不到病根的
  * 「NOT NULL constraint failed: stock_events.batch_id」。
  */
-function insertedId(res: {
+export function insertedId(res: {
   lastInsertRowId?: number | bigint;
   lastInsertRowid?: number | bigint;
 }): number {
@@ -121,56 +121,71 @@ function insertedId(res: {
 }
 
 /**
- * 落库。**整体一个事务** —— 数量改了却没写事件，就是账实不符（不变量 1），
- * 这种中间状态绝不允许被别的查询看到。
+ * 把一个方案写进**给定的执行器**。调用方负责事务边界。
+ *
+ * ⚠️ 这个函数**只允许**在已经开着事务的地方调（`applyPlan`、或 `medicines.ts`
+ * 里那种「结算 + 改档案行」的复合事务）。独立的库存操作请一律用 `applyPlan` ——
+ * 拿了 `Executor` 就写不出 `exec.transaction(...)`，所以「在外层事务里再开一层」
+ * 这件事在类型上已经被挡掉了（见 `client.ts` 的 `Executor`）。
  *
  * `createdAt` / `updatedAt` 用同一个 `now`：一次操作产生的一组行时间一致，
  * 时间线排序才不会出现「事件比批次早 1 毫秒」这种要靠 id 兜底的乱序。
  */
+export function applyPlanOn(exec: Executor, plan: Plan, now: Instant): void {
+  let createdId: number | null = null;
+
+  if (plan.create) {
+    const res = exec
+      .insert(batches)
+      .values({ ...plan.create, createdAt: now, updatedAt: now })
+      .run();
+    createdId = insertedId(res);
+  }
+
+  for (const { id, patch } of plan.patches) {
+    exec.update(batches).set({ ...patch, updatedAt: now }).where(eq(batches.id, id)).run();
+  }
+
+  if (plan.ledger) {
+    // 起算日与已核算消耗量**一起写**（不变量 5）。分成两条 UPDATE
+    // 中间被读到，就是一个自相矛盾的账本。
+    exec
+      .update(medicines)
+      .set({ autoFrom: plan.ledger.autoFrom, autoAccounted: plan.ledger.autoAccounted })
+      .where(eq(medicines.id, plan.ledger.medicineId))
+      .run();
+  }
+
+  for (const e of plan.events) {
+    // null = 刚创建的那一盒（只有入库会这样）。既没指定批次、本次又没新建批次，
+    // 说明方案本身不成立 —— 与其让 SQLite 报一句 NOT NULL，不如在这里说清楚
+    const batchId = e.batchId ?? createdId;
+    if (batchId === null) {
+      throw new Error('方案里有个事件既没指定批次，本次操作也没有新建批次');
+    }
+    exec
+      .insert(stockEvents)
+      .values({
+        batchId,
+        type: e.type,
+        deltaQty: e.deltaQty,
+        qtyAfter: e.qtyAfter,
+        reason: e.reason,
+        createdAt: now,
+      })
+      .run();
+  }
+}
+
+/**
+ * 落库。**整体一个事务** —— 数量改了却没写事件，就是账实不符（不变量 1），
+ * 这种中间状态绝不允许被别的查询看到。
+ *
+ * 独立操作都走这里；`applyPlanOn` 是给「还要在同一个事务里写别的东西」的
+ * 复合场景用的（目前只有药品档案编辑）。
+ */
 export function applyPlan(db: MedboxDb, plan: Plan, now: Instant = Date.now()): void {
-  db.transaction((tx) => {
-    let createdId: number | null = null;
-
-    if (plan.create) {
-      const res = tx
-        .insert(batches)
-        .values({ ...plan.create, createdAt: now, updatedAt: now })
-        .run();
-      createdId = insertedId(res);
-    }
-
-    for (const { id, patch } of plan.patches) {
-      tx.update(batches).set({ ...patch, updatedAt: now }).where(eq(batches.id, id)).run();
-    }
-
-    if (plan.ledger) {
-      // 起算日与已核算消耗量**一起写**（不变量 5）。分成两条 UPDATE
-      // 中间被读到，就是一个自相矛盾的账本。
-      tx.update(medicines)
-        .set({ autoFrom: plan.ledger.autoFrom, autoAccounted: plan.ledger.autoAccounted })
-        .where(eq(medicines.id, plan.ledger.medicineId))
-        .run();
-    }
-
-    for (const e of plan.events) {
-      // null = 刚创建的那一盒（只有入库会这样）。既没指定批次、本次又没新建批次，
-      // 说明方案本身不成立 —— 与其让 SQLite 报一句 NOT NULL，不如在这里说清楚
-      const batchId = e.batchId ?? createdId;
-      if (batchId === null) {
-        throw new Error('方案里有个事件既没指定批次，本次操作也没有新建批次');
-      }
-      tx.insert(stockEvents)
-        .values({
-          batchId,
-          type: e.type,
-          deltaQty: e.deltaQty,
-          qtyAfter: e.qtyAfter,
-          reason: e.reason,
-          createdAt: now,
-        })
-        .run();
-    }
-  });
+  db.transaction((tx) => applyPlanOn(tx, plan, now));
 }
 
 /** 算出方案并落库 —— 七个操作共用的外壳。 */

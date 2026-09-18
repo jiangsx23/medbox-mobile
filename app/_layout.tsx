@@ -27,8 +27,10 @@ export default function RootLayout() {
           }}
         >
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="medicine/[id]" options={{ title: '药品详情' }} />
+          <Stack.Screen name="medicine/[id]/index" options={{ title: '药品详情' }} />
           {/* 标题由各页自己用 <Stack.Screen options> 覆盖 —— 入库页要带药名 */}
+          <Stack.Screen name="medicine/new" options={{ title: '新建药品' }} />
+          <Stack.Screen name="medicine/[id]/edit" options={{ title: '编辑档案' }} />
           <Stack.Screen name="batch/new" options={{ title: '入库' }} />
           <Stack.Screen name="batch/[id]/edit" options={{ title: '编辑这一盒' }} />
           <Stack.Screen name="member/new" options={{ title: '添加成员' }} />

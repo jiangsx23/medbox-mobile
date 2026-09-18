@@ -12,6 +12,13 @@
  */
 import { eq } from 'drizzle-orm';
 
+import {
+  batchCountOf,
+  createMedicine,
+  deleteMedicine,
+  medicineById,
+  updateMedicine,
+} from '../src/data/medicines';
 import { deleteMember, ownedMedicineCount } from '../src/data/members';
 import { getThresholds } from '../src/data/queries';
 import {
@@ -31,10 +38,13 @@ import { batches, medicines, members, settings, stockEvents } from '../src/db/sc
 import { addDays } from '../src/domain/calendar';
 import {
   BATCH_IN_STOCK,
+  BATCH_USED_UP,
   DEFAULT_RESTOCK_DAYS,
+  EVENT_AUTO,
   KEY_NEAR_EXPIRY_DAYS,
   KEY_RESTOCK_DAYS,
 } from '../src/domain/constants';
+import type { MedicineForm } from '../src/domain/medicine';
 import { getIntSetting, getSetting, setSetting } from '../src/importer/apply';
 import { addBatch, addMedicine, freshDb, insertId } from './helpers';
 
@@ -455,5 +465,287 @@ describe('设置', () => {
     setSetting(db, KEY_RESTOCK_DAYS, '7');
 
     expect(getThresholds(db)).toEqual({ nearDays: 30, restockDays: 7 });
+  });
+});
+
+// ══ 药品档案 ═════════════════════════════════════════════════════════════
+//
+// 校验（什么能存、报什么话）在 `test/medicine.test.ts` 里测，那是纯的。
+// 这里测的是**落库之后到底发生了什么** —— 扣了几片、事件写了什么、账本对不对。
+//
+// 这一组是全仓库第二要紧的地方（第一是自动扣减本身）：改剂量/开关是唯一
+// 「静默改真实库存、算错了用户看不出来」的用户操作。
+
+/** 一张合法的档案表单。每个用例只覆盖它关心的字段。 */
+function mform(over: Partial<MedicineForm> = {}): MedicineForm {
+  return {
+    generic: '测试药',
+    brand: '',
+    spec: '',
+    form: '',
+    category: '',
+    purposeNotes: '',
+    dailyDose: '',
+    unit: '片',
+    ownerId: '',
+    autoDeduct: false,
+    ...over,
+  };
+}
+
+/** 库里一共有多少条变动记录 —— 用来断言「这次操作一条都没写」。 */
+function eventCount(db: MedboxDb): number {
+  return db.select().from(stockEvents).all().length;
+}
+
+describe('药品档案', () => {
+  it('改每日用量：先按**旧**用量结清，再以今天重新起算 —— 10 天只扣 10，不是 20', () => {
+    const db = freshDb();
+    const m = autoMed(db, 10); // 每日 1、起算日在 10 天前、已核算 0
+    const b = box(db, m, 30);
+
+    const res = updateMedicine(
+      db,
+      m,
+      mform({ generic: '测试药', dailyDose: '2', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(true);
+
+    // 要害：如果先赋新值（每日 2）再结清，这里会是 30 - 20 = 10。
+    // 正确顺序是拿**旧**的每日 1 去算过去 10 天，扣 10 片。
+    expect(qtyOf(db, b)).toBe(20);
+
+    // 事件原因里写的是**旧**用量。带全角右括号是为了挡住「每日用量 12）」
+    // 这类误匹配 —— 只搜 `每日用量 1` 的话，用量 12 的串也能匹配上。
+    expect(lastEvent(db, b).reason).toContain('每日用量 1）');
+    expect(lastEvent(db, b).type).toBe(EVENT_AUTO);
+
+    // 账本重设到今天、已核算归零
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: TODAY, autoAccounted: 0 });
+    // 档案行也真的写进去了 —— 这一条同时钉住「结算与档案行在同一个事务里」
+    expect(medicineById(db, m)!.dailyDose).toBe(2);
+
+    assertInvariant1(db);
+  });
+
+  it('改成自动扣减：账本初始化为**今天**，不追溯过去的天数', () => {
+    const db = freshDb();
+    // 没开自动扣减、也没有起算日，但药已经躺在库里
+    const m = med(db);
+    const b = box(db, m, 30);
+
+    const res = updateMedicine(db, m, mform({ dailyDose: '1', autoDeduct: true }), TODAY, NOW);
+    expect(res.ok).toBe(true);
+
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: TODAY, autoAccounted: 0 });
+    // 一片都没扣 —— 打开开关不该把「之前那些天」补算上
+    expect(qtyOf(db, b)).toBe(30);
+    expect(events(db, b)).toHaveLength(0);
+
+    // 刻意**不调** assertInvariant1：这里要断言的正是「一条事件都没有」，
+    // 而 box() 造出来的批次本来就没有事件（模拟导入的存量数据，§6.9 的例外），
+    // 那条不变量在这里必然报「批次没有变动记录」。别的用例两样都要，这里只取一样。
+  });
+
+  it('关掉自动扣减：**仍然先按旧参数结清**（有意保持与上游一致）', () => {
+    // 上游的 auto_changed 对「开关变了」和「剂量变了」是对称的。关掉之前
+    // 那几天吃过的药是真的吃过了，不结清等于白送。代价是这个动作会产生
+    // 一条自动扣减事件 —— 所以编辑页必须给用户解释（见那个「notice」提示块）。
+    const db = freshDb();
+    const m = autoMed(db, 10);
+    const b = box(db, m, 30);
+
+    const res = updateMedicine(db, m, mform({ dailyDose: '1', autoDeduct: false }), TODAY, NOW);
+    expect(res.ok).toBe(true);
+
+    expect(qtyOf(db, b)).toBe(20);
+    expect(lastEvent(db, b).type).toBe(EVENT_AUTO);
+    expect(medicineById(db, m)!.autoDeduct).toBe(false);
+
+    assertInvariant1(db);
+  });
+
+  it('只改通用名：库存、账本、时间线**一个字都不动**', () => {
+    // 防「每次保存都 rebaseline」—— 那会让用户改个错别字就触发一次
+    // 自动扣减，外加时间线上多一条莫名其妙的记录。
+    const db = freshDb();
+    const m = autoMed(db, 10);
+    const b = box(db, m, 30);
+    const before = eventCount(db);
+
+    const res = updateMedicine(
+      db,
+      m,
+      mform({ generic: '改个错别字', dailyDose: '1', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(true);
+
+    expect(medicineById(db, m)!.generic).toBe('改个错别字');
+    expect(qtyOf(db, b)).toBe(30);
+    expect(eventCount(db)).toBe(before);
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: addDays(TODAY, -10), autoAccounted: 0 });
+
+    // 同上：这里断言的是「一条事件都没写」，与 assertInvariant1 互斥
+  });
+
+  it('暂停中的药只改通用名，**不会**被默默解除暂停', () => {
+    // 编辑表单里没有暂停开关，用户改个错别字不会被提示「你的药重新开始扣了」。
+    // 所以「autoDeduct 为真就置 autoPaused = false」是错的写法。
+    const db = freshDb();
+    const m = med(db, { autoDeduct: true, autoPaused: true, dailyDose: 1, autoFrom: TODAY });
+    box(db, m, 30);
+
+    const res = updateMedicine(
+      db,
+      m,
+      mform({ generic: '改个错别字', dailyDose: '1', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(true);
+
+    expect(medicineById(db, m)!.autoPaused).toBe(true);
+  });
+
+  it('改单位 / 改归属**不改写已有批次**', () => {
+    // 单位与归属只对**之后新入库**的批次生效。改写已有批次等于静默篡改历史 ——
+    // 用户看到的是「这盒明明写着一盒，怎么变成一片了」。
+    const db = freshDb();
+    const dad = insertId(db.insert(members).values({ name: '爸爸', createdAt: NOW }).run());
+    const mom = insertId(db.insert(members).values({ name: '妈妈', createdAt: NOW }).run());
+    const m = med(db, { unit: '片', ownerId: dad });
+    const b1 = box(db, m, 10, { unit: '片', ownerId: dad });
+    const b2 = box(db, m, 20, { unit: '片', ownerId: dad });
+    const before = eventCount(db);
+
+    const res = updateMedicine(db, m, mform({ unit: '盒', ownerId: String(mom) }), TODAY, NOW);
+    expect(res.ok).toBe(true);
+
+    // 档案行是新值……
+    const row = medicineById(db, m)!;
+    expect(row.unit).toBe('盒');
+    expect(row.ownerId).toBe(mom);
+    // ……而两盒还是旧值，且没有产生任何记录
+    expect(batchById(db, b1)!.unit).toBe('片');
+    expect(batchById(db, b1)!.ownerId).toBe(dad);
+    expect(batchById(db, b2)!.unit).toBe('片');
+    expect(batchById(db, b2)!.ownerId).toBe(dad);
+    expect(eventCount(db)).toBe(before);
+  });
+
+  it('校验失败时**一行都不写** —— 库存、账本、档案行全都原样', () => {
+    const db = freshDb();
+    const m = autoMed(db, 10);
+    const b = box(db, m, 30);
+    const before = eventCount(db);
+
+    const res = updateMedicine(
+      db,
+      m,
+      mform({ generic: '', dailyDose: 'abc', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('不该通过');
+    expect(Object.keys(res.errors).sort()).toEqual(['dailyDose', 'generic']);
+
+    expect(qtyOf(db, b)).toBe(30);
+    expect(eventCount(db)).toBe(before);
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: addDays(TODAY, -10), autoAccounted: 0 });
+    expect(medicineById(db, m)!.generic).toBe('测试药');
+  });
+
+  it('药品不存在：报一句 `_` 错误，且什么都不写', () => {
+    const db = freshDb();
+    const before = eventCount(db);
+
+    const res = updateMedicine(db, 999, mform(), TODAY, NOW);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('不该通过');
+    expect(res.errors._).toContain('药品不存在');
+    expect(eventCount(db)).toBe(before);
+  });
+
+  it('新建：起算日 = **建档当天**，已核算 = 0，且一条变动记录都不产生', () => {
+    const db = freshDb();
+
+    const res = createMedicine(
+      db,
+      mform({ generic: '二甲双胍缓释片', dailyDose: '2', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error('不该失败');
+
+    const row = medicineById(db, res.id)!;
+    expect(row.autoFrom).toBe(TODAY);
+    expect(row.autoAccounted).toBe(0);
+    expect(row.createdAt).toBe(NOW);
+    // 建档不产生事件 —— 而且是结构性的：stock_events.batch_id 是 NOT NULL
+    // 且外键指向 batches，一盒都没有时根本没有可挂的行
+    expect(eventCount(db)).toBe(0);
+  });
+
+  it('新建：没勾自动扣减时起算日**为空**', () => {
+    const db = freshDb();
+    const res = createMedicine(db, mform(), TODAY, NOW);
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(medicineById(db, res.id)!.autoFrom).toBeNull();
+  });
+
+  it('新建：id 是真的（不是 NaN）—— 驱动键名差异的回归点', () => {
+    // `createMember` 就是在这上面栽的：它写 `Number(res.lastInsertRowId)`，
+    // 而 better-sqlite3 返回的键是小写 d，于是拿到 NaN —— 本地测试全绿、
+    // 真机反而是好的。这条把 createMedicine 钉住。
+    const db = freshDb();
+    const res = createMedicine(db, mform(), TODAY, NOW);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(Number.isInteger(res.id)).toBe(true);
+    expect(medicineById(db, res.id)).toBeDefined();
+  });
+
+  it('删除：有一条**已用完**的批次也拒绝 —— 判据是全部批次，不是「在库」批次', () => {
+    // 用 inStockBatchesOf 当判据的话，这里会被放行，然后外键抛一句
+    // `FOREIGN KEY constraint failed` —— 指不到病根的原始报错。
+    const db = freshDb();
+    const m = med(db);
+    const b = box(db, m, 5);
+    usedUp(db, m, b, TODAY, NOW);
+    expect(statusOf(db, b)).toBe(BATCH_USED_UP);
+    expect(inStockBatchesOf(db, m)).toHaveLength(0); // 在库确实是空的
+
+    const res = deleteMedicine(db, m);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('不该通过');
+    // 药名（用户手上有十几种药）+ 条数（判断有没有点错对象）
+    expect(res.errors._).toContain('「测试药」');
+    expect(res.errors._).toContain('1 条批次记录');
+    // 拒绝就是拒绝：档案行与批次都原样
+    expect(medicineById(db, m)).toBeDefined();
+    expect(batchById(db, b)).toBeDefined();
+  });
+
+  it('删除：一条批次都没有时可以删', () => {
+    const db = freshDb();
+    const m = med(db);
+
+    const res = deleteMedicine(db, m);
+    expect(res.ok).toBe(true);
+    expect(medicineById(db, m)).toBeUndefined();
+  });
+
+  it('删除：药品不存在时报错，不静默成功', () => {
+    const db = freshDb();
+    const res = deleteMedicine(db, 999);
+    expect(res.ok).toBe(false);
   });
 });

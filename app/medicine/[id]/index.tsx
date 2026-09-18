@@ -12,17 +12,17 @@
  * 点错了必须能就地改回来。压成一行就没地方放「恢复在库」了。
  */
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { medicineDetail } from '../../src/data/queries';
-import { BATCH_STATUS_LABELS, EVENT_LABELS } from '../../src/domain/constants';
-import { formatDose } from '../../src/domain/forecast';
-import { toLocalDisplay } from '../../src/domain/instant';
-import { Card, Empty, ExpiryPill, Pill, SectionTitle } from '../../src/ui/components';
-import { BatchOps } from '../../src/ui/stockops';
-import { useQuery } from '../../src/ui/useQuery';
-import { color, font, radius, screen, space, text, tone } from '../../src/ui/theme';
+import { medicineDetail } from '../../../src/data/queries';
+import { BATCH_STATUS_LABELS, EVENT_LABELS } from '../../../src/domain/constants';
+import { formatDose } from '../../../src/domain/forecast';
+import { toLocalDisplay } from '../../../src/domain/instant';
+import { Card, Empty, ExpiryPill, Pill, SectionTitle } from '../../../src/ui/components';
+import { BatchOps } from '../../../src/ui/stockops';
+import { useQuery } from '../../../src/ui/useQuery';
+import { color, font, radius, screen, space, text, tone } from '../../../src/ui/theme';
 
 /** 「＋ 再入库一盒」——在库区的收尾动作，也是空状态下的唯一出路。 */
 function IntakeButton({ onPress }: { onPress: () => void }) {
@@ -53,6 +53,21 @@ export default function MedicineDetailScreen() {
 
   return (
     <ScrollView style={screen} contentContainerStyle={styles.content}>
+      <Stack.Screen
+        options={{
+          title: m.generic,
+          // 「编辑档案」的入口。改的是**档案**（单位/归属/每日用量/自动扣减），
+          // 不是某盒的数量 —— 后者在每盒卡片上的「编辑」里，两者别搞混。
+          headerRight: () => (
+            <Pressable
+              hitSlop={8}
+              onPress={() => router.push({ pathname: '/medicine/[id]/edit', params: { id: id! } })}
+            >
+              <Text style={styles.headerBtn}>编辑</Text>
+            </Pressable>
+          ),
+        }}
+      />
       <Text style={styles.h1}>
         {m.generic}
         {m.brand ? <Text style={styles.h1Sub}>（{m.brand}）</Text> : null}
@@ -313,4 +328,5 @@ const styles = StyleSheet.create({
   intakeText: { fontSize: font.small, color: color.brand, fontWeight: '600' },
 
   footHint: { fontSize: font.tiny, color: color.muted, textAlign: 'center', marginTop: space.xl },
+  headerBtn: { fontSize: font.base, color: color.brand, fontWeight: '600' },
 });

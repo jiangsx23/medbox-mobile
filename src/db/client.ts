@@ -25,6 +25,24 @@ export const DB_NAME = 'medbox.db';
 
 export type MedboxDb = ReturnType<typeof drizzle<typeof schema>>;
 
+/**
+ * 能执行 insert / update / delete 的最小接口。
+ *
+ * 数据库句柄（`MedboxDb`）与**事务句柄**（`db.transaction((tx) => …)` 里的 `tx`）
+ * 都满足它 —— 这是刻意的：`Pick` 正好把 `transaction` 排除在外，于是拿到
+ * `Executor` 的代码**写不出** `exec.transaction(...)`。
+ *
+ * ── 为什么非要挡住 ─────────────────────────────────────────────────────
+ * 两个驱动对「事务里再开事务」的行为**不一样**：better-sqlite3 的
+ * `db.transaction()` 内部降级成 SAVEPOINT，嵌套静默成功；expo-sqlite 走的是
+ * 裸 `begin`/`commit`，第二个 BEGIN 直接抛
+ * `cannot start a transaction within a transaction`。
+ *
+ * 也就是说「外层开事务、里面再调一个自己开事务的函数」这种写法
+ * **本地测试全绿、装到手机上必炸**。类型上挡掉比注释里提醒可靠。
+ */
+export type Executor = Pick<MedboxDb, 'insert' | 'update' | 'delete'>;
+
 export type DbHandle = {
   sqlite: SQLite.SQLiteDatabase;
   db: MedboxDb;

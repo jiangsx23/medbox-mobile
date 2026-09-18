@@ -16,6 +16,7 @@ import { eq } from 'drizzle-orm';
 import type { MedboxDb } from '../db/client';
 import type { Instant, Member } from '../db/schema';
 import { medicines, members } from '../db/schema';
+import { insertedId } from './stock';
 
 export type MemberResult = { ok: true; id: number } | { ok: false; errors: Record<string, string> };
 
@@ -58,7 +59,11 @@ export function createMember(
     .insert(members)
     .values({ name: rawName.trim(), notes: (rawNotes ?? '').trim() || null, createdAt: now })
     .run();
-  return { ok: true, id: Number(res.lastInsertRowId) };
+  // ⚠️ 走 `insertedId` 而不是 `Number(res.lastInsertRowId)`：drizzle 的两个驱动
+  // 返回的键名不一样（expo-sqlite 大写 D、better-sqlite3 小写 d），直接取会在
+  // 测试环境（以及任何用 better-sqlite3 的地方）拿到 NaN —— 而 App 上是好的，
+  // 所以这个错**只在测试里现形**。实测过：改之前这里返回 `{ok: true, id: NaN}`。
+  return { ok: true, id: insertedId(res) };
 }
 
 export function updateMember(

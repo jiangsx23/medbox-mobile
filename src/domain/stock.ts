@@ -182,8 +182,12 @@ const FIELD_LABELS: Record<string, string> = {
  *
  * 账本与当前值完全相同时不写 —— 否则每次冷启动结算都会把 6 个药的档案行
  * 无谓地重写一遍。真正需要落库的是「起算日被推到今天」和「归零」这类变化。
+ *
+ * 第三个参数是**药品账本那三个字段**（不是整个 `OpContext`）—— 因为药品档案
+ * 编辑也要复用它，而那里手上没有 `OpContext`。收窄到这个形状之后，
+ * 「结算 → 方案」的规则**只有这一份**，档案编辑是复用而不是复制。
  */
-function applySettlement(plan: Plan, s: Settlement, ctx: OpContext): Plan {
+export function mergeSettlement(plan: Plan, s: Settlement, med: AutoMedicine): Plan {
   for (const t of s.takes) {
     pushPatch(plan, t.batchId, t.usedUp ? { qty: 0, status: BATCH_USED_UP } : { qty: t.qtyAfter });
     plan.events.push({
@@ -195,7 +199,6 @@ function applySettlement(plan: Plan, s: Settlement, ctx: OpContext): Plan {
       reason: s.reason,
     });
   }
-  const med = ctx.medicine;
   if (s.autoFrom !== med.autoFrom || s.autoAccounted !== med.autoAccounted) {
     plan.ledger = { medicineId: med.id, autoFrom: s.autoFrom, autoAccounted: s.autoAccounted };
   }
@@ -249,7 +252,7 @@ export function planIntake(ctx: OpContext, form: IntakeForm): OpResult {
   const plan: Plan = { patches: [], events: [] };
   // 先用手上现有的库存结清，再重设起算日 —— 注意用的是 ctx.inStock，
   // 里面**不含**这一批新货（它还没建出来）
-  applySettlement(plan, planRebaseline(ctx.medicine, ctx.inStock, ctx.today, true), ctx);
+  mergeSettlement(plan, planRebaseline(ctx.medicine, ctx.inStock, ctx.today, true), ctx.medicine);
 
   plan.create = {
     medicineId: ctx.medicine.id,
@@ -341,7 +344,7 @@ export function planUsedUp(
     reason: '用完',
   });
   const settle = planRebaseline(ctx.medicine, withoutBatch(ctx.inStock, batch.id), ctx.today, true);
-  applySettlement(plan, settle, ctx);
+  mergeSettlement(plan, settle, ctx.medicine);
   return { ok: true, plan };
 }
 
@@ -364,7 +367,7 @@ export function planDiscard(
     reason: orNull(reason),
   });
   const settle = planRebaseline(ctx.medicine, withoutBatch(ctx.inStock, batch.id), ctx.today, true);
-  applySettlement(plan, settle, ctx);
+  mergeSettlement(plan, settle, ctx.medicine);
   return { ok: true, plan };
 }
 
@@ -415,7 +418,7 @@ export function planRestock(
   const plan: Plan = { patches: [], events: [] };
   // 结算要用「恢复之前」的在库清单：此刻这一盒还不在里面
   const settle = planRebaseline(ctx.medicine, ctx.inStock, ctx.today, true);
-  applySettlement(plan, settle, ctx);
+  mergeSettlement(plan, settle, ctx.medicine);
   pushPatch(plan, batch.id, { status: BATCH_IN_STOCK });
   plan.events.push({
     batchId: batch.id,
@@ -504,7 +507,7 @@ export function planEdit(
 
   // 手动改数量 = 纠正账本。放在写新值之前，结算读到的才是旧数量。
   if (next.qty !== prev.qty) {
-    applySettlement(plan, planRebaseline(ctx.medicine, ctx.inStock, ctx.today, true), ctx);
+    mergeSettlement(plan, planRebaseline(ctx.medicine, ctx.inStock, ctx.today, true), ctx.medicine);
   }
 
   const patch: BatchPatch = { ...next };
@@ -545,5 +548,5 @@ export function planEdit(
  */
 export function planSettle(ctx: OpContext): Plan {
   const plan: Plan = { patches: [], events: [] };
-  return applySettlement(plan, planSettlement(ctx.medicine, ctx.inStock, ctx.today), ctx);
+  return mergeSettlement(plan, planSettlement(ctx.medicine, ctx.inStock, ctx.today), ctx.medicine);
 }
