@@ -31,6 +31,10 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 ## 关键实现规则（详细版见 DESIGN.md）
 
 - **磁盘是真相**：`Batch.qty` 必须 == 该批次最后一条 `StockEvent.qty_after`（存量数据例外，见 DESIGN.md §6.9）。
+- **插入后取新 id 一律用 `src/data/stock.ts` 的 `insertedId()`**，别写 `res.lastInsertRowId` ——
+  两个驱动的键名大小写不同（测试上小写 d、App 上大写 D），写错的表现是 `NaN`。这个坑踩过两次。
+- **不要在事务里再开事务。** 独立操作调 `applyPlan(db, …)`；已经在事务里就调 `applyPlanOn(exec, …)`。
+  类型上已经拦住了（`Executor` 用 `Pick` 去掉了 `transaction`），但别去绕它 —— 见 DESIGN.md §8.6。
 - **结算时机**：冷启动 + 每次回前台 + **任何读库存的界面渲染之前**。幂等，多跑无害。**没结算完不许渲染库存数字**，否则同一份数据在不同页面会自相矛盾。
 - **日期口径**：日历日（`auto_from`/`expiry_date`/`opened_at`，JSON 里是 `'2026-09-15'`）与时刻（`created_at`，JSON 里是 **UTC naive**）**必须分开**。算天数用日历日相减，别拿时刻除以 86400。
 - **导入的 7 个坑**见 DESIGN.md §7.2。最容易出事的两个：🔴 `auto_from` 要重设为导入当天（否则 6 个三高药会被一次扣爆）、🔴 `created_at`/`updated_at` 按 **UTC** 解析而 `exported_at` 要**丢弃**。
@@ -79,21 +83,31 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 | `tests/test_autodose.py` | 409 | 34 | 规则照搬、测试代码重写 | ✅ `test/autodose.test.ts` |
 | `tests/test_migrate.py` | 180 | 9 | ❌ 网页版专用，作废 | — |
 
-**已落地 175 条**（`npx jest`，7 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
+**已落地 227 条**（`npx jest`，9 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
 —— 装机后对着它核，别凭印象。
 
 `test/data.test.ts` 与 `test/helpers.ts` 是**额外的**：上游没有对应物，测的是**落库层在真 SQLite 上**
 的往返（外键、NOT NULL、事务、驱动差异）。建库方式见 `test/helpers.ts` 文件头。
+`test/settings.test.ts` 与 `test/medicine.test.ts` 同理（上游那两个页面没有测试）。
+
+> ⚠️ **测试驱动与运行驱动不是同一个**（better-sqlite3 vs expo-sqlite）。
+> 两边行为有差异，所以**测试全绿不等于真机不炸** —— DESIGN.md §8.6 那个
+> 嵌套事务的坑就是这样漏过去的。能靠类型排掉的，别靠纪律。
 
 ## 当前进度
 
 - **M1 代码部分完成**（`4487a1e`）：骨架 + 本地库（关 WAL）+ JSON 导入 + 首页 + 药品列表/详情
 - **M2 完成**（`0666cf2` + `22374f8`）：入库 + 五种库存操作 + 成员管理
   （含**提前并入的自动扣减结算** —— 这是刻意偏离里程碑顺序，理由见 DESIGN.md §8.4）
-- **M3 的测试补齐**（2026-09-17）：上游 `test_expiry.py`(11) + `test_forecast.py`(5) 全部落地
+- **M3 完成**（`c77fec6` + `70c9bd6`）：效期分档 + 补货预测的测试全部落地
+- **设置页阈值可改 + 药品档案 CRUD**（`9f41765` + `716d3de`，2026-09-18）：
+  关掉了「单位没填时让用户去『编辑档案』，而那个界面不存在」这条断头路。
+  顺带把 M4 的「每日用量编辑界面」那半边做完了（**刻意越界，用户已确认**），
+  **M4 只剩暂停服药 / 恢复服药**。理由与两个新挖出的坑见 DESIGN.md §8.6
 
-`tsc` 干净、**175 条测试全过**。APK 已出并验签
-（`android/app/build/outputs/apk/release/app-release.apk`，61 MB，2026-09-17）。
+`tsc` 干净、**227 条测试全过**。APK 已出并验签
+（`android/app/build/outputs/apk/release/app-release.apk`，61 MB，2026-09-17
+—— **不含 2026-09-18 的改动**，下次出包会带上）。
 
 ### 🔴 唯一还卡着的一件事：M1 清单第 9 项 —— 装机验收
 
