@@ -13,6 +13,7 @@
 import { eq } from 'drizzle-orm';
 
 import { deleteMember, ownedMedicineCount } from '../src/data/members';
+import { getThresholds } from '../src/data/queries';
 import {
   batchById,
   discard,
@@ -26,9 +27,15 @@ import {
   usedUp,
 } from '../src/data/stock';
 import type { MedboxDb } from '../src/db/client';
-import { batches, medicines, members, stockEvents } from '../src/db/schema';
+import { batches, medicines, members, settings, stockEvents } from '../src/db/schema';
 import { addDays } from '../src/domain/calendar';
-import { BATCH_IN_STOCK } from '../src/domain/constants';
+import {
+  BATCH_IN_STOCK,
+  DEFAULT_RESTOCK_DAYS,
+  KEY_NEAR_EXPIRY_DAYS,
+  KEY_RESTOCK_DAYS,
+} from '../src/domain/constants';
+import { getIntSetting, getSetting, setSetting } from '../src/importer/apply';
 import { addBatch, addMedicine, freshDb, insertId } from './helpers';
 
 const TODAY = '2026-09-14';
@@ -404,5 +411,49 @@ describe('成员删除', () => {
 
     expect(deleteMember(db, memberId).ok).toBe(true);
     expect(db.select().from(members).all()).toHaveLength(0);
+  });
+});
+
+// ══ 设置 ═════════════════════════════════════════════════════════════════
+//
+// 输入的校验（什么能存、报什么话）在 `test/settings.test.ts` 里测，那是纯的。
+// 这里只测**写进去之后**的行为：upsert 真的覆盖了吗、读回来对不对。
+
+describe('设置', () => {
+  it('同一个键写两次只留一行，值是后写的', () => {
+    const db = freshDb();
+
+    setSetting(db, 'near_expiry_days', '90');
+    setSetting(db, 'near_expiry_days', '30');
+
+    const rows = db.select().from(settings).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].value).toBe('30');
+  });
+
+  it('没写过的键读到默认值，写完之后读到新值', () => {
+    const db = freshDb();
+
+    expect(getIntSetting(db, 'restock_days', DEFAULT_RESTOCK_DAYS)).toBe(DEFAULT_RESTOCK_DAYS);
+
+    setSetting(db, 'restock_days', '7');
+    expect(getIntSetting(db, 'restock_days', DEFAULT_RESTOCK_DAYS)).toBe(7);
+    expect(getSetting(db, 'restock_days')).toBe('7');
+  });
+
+  it('界面读阈值的那条路（getThresholds）认新值', () => {
+    // 这条测的是**接线**：设置页写的是 KEY_NEAR_EXPIRY_DAYS / KEY_RESTOCK_DAYS
+    // 这两个键，而首页读的是 getThresholds。两边对不上的话，用户保存完
+    // 回到首页发现数字没变，却以为是自己没点中「保存」。
+    //
+    // 这里**刻意不断言库存没变**：`setSetting` 结构上就碰不到任何库存表，
+    // 断言它只会得到一条永远不可能失败的装饰。真正需要防的是「界面在保存阈值时
+    // 顺手调了一次结算」—— 那是界面层的错，得靠手工过一遍，测不到这里来。
+    const db = freshDb();
+
+    setSetting(db, KEY_NEAR_EXPIRY_DAYS, '30');
+    setSetting(db, KEY_RESTOCK_DAYS, '7');
+
+    expect(getThresholds(db)).toEqual({ nearDays: 30, restockDays: 7 });
   });
 });

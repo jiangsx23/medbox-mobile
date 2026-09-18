@@ -178,3 +178,22 @@ export function getSetting(db: MedboxDb, key: string): string | null {
   const row = db.select().from(settings).where(eq(settings.key, key)).get();
   return row?.value ?? null;
 }
+
+/**
+ * 写一个设置（有则改、无则建）。
+ *
+ * 写成**一条** `INSERT … ON CONFLICT DO UPDATE`，而不是「先 delete 再 insert」：
+ * 后者两条语句之间进程被杀（手机上是常态 —— 切后台被回收、崩溃、OOM），
+ * 结果是**这个键不见了**。而 `getIntSetting` 读不到就回默认值，所以表现是
+ * 「用户把快过期改成 30 天，回来一看又变回 90 天」，且**没有任何报错**。
+ * 一条语句天然原子，调用方也不必记得开事务。
+ *
+ * 位置说明：这里与两个 getter 同表同处。如果设置页将来长出别的功能，
+ * 三个一起搬去 `src/data/settings.ts` 即可（那时是一次纯搬迁）。
+ */
+export function setSetting(db: MedboxDb, key: string, value: string): void {
+  db.insert(settings)
+    .values({ key, value })
+    .onConflictDoUpdate({ target: settings.key, set: { value } })
+    .run();
+}

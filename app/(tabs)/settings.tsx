@@ -7,26 +7,36 @@
  * 2. 上次导入的时间和源文件名 —— 核对「我导的是哪份」
  * 3. 库里的行数 —— 和网页版对数量时用得上
  *
- * 阈值（90 天 / 15 天）这一版只读不写：改了会影响首页的「快过期」分档，
- * 而 M1 的验收标准正是「数量对得上网页版」。等 M3 做完预测再放开编辑。
+ * 阈值（90 天 / 15 天）可编辑 —— M3 的预测已经做完并有测试兜着，
+ * 原先那句「等 M3 做完预测再放开编辑」的前提已经不成立了。
+ * 这两个数**只影响分档显示**，不动任何库存（见下面的文案）。
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { DB_NAME, isWalDisabled } from '../../src/db/client';
 import * as schema from '../../src/db/schema';
 import { getThresholds } from '../../src/data/queries';
-import { getSetting, KEY_LAST_IMPORT_AT, KEY_LAST_IMPORT_FILE } from '../../src/importer/apply';
+import {
+  getSetting,
+  KEY_LAST_IMPORT_AT,
+  KEY_LAST_IMPORT_FILE,
+  setSetting,
+} from '../../src/importer/apply';
+import { KEY_NEAR_EXPIRY_DAYS, KEY_RESTOCK_DAYS } from '../../src/domain/constants';
 import { toLocalDisplay } from '../../src/domain/instant';
+import { parseThresholds, type ThresholdErrors } from '../../src/domain/settings';
 import { Card, Field, SectionTitle } from '../../src/ui/components';
 import { useDb } from '../../src/ui/DbProvider';
+import { Button, TextField } from '../../src/ui/form';
 import { useQuery } from '../../src/ui/useQuery';
 import { color, font, screen, space, text, tone } from '../../src/ui/theme';
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { hasData, journalMode } = useDb();
+  const { db, hasData, journalMode, reload } = useDb();
 
   const info = useQuery((db) => {
     const th = getThresholds(db);
@@ -44,6 +54,31 @@ export default function SettingsScreen() {
       },
     };
   });
+
+  // 输入框只在用户动过之后才受控（null = 还没动）——
+  // 否则保存后 `info` 重取，用户正在打字的框会被冲掉
+  const [near, setNear] = useState<string | null>(null);
+  const [restock, setRestock] = useState<string | null>(null);
+  const [errors, setErrors] = useState<ThresholdErrors>({});
+  const [saved, setSaved] = useState(false);
+
+  const nearValue = near ?? String(info.thresholds.nearDays);
+  const restockValue = restock ?? String(info.thresholds.restockDays);
+
+  const save = () => {
+    const res = parseThresholds(nearValue, restockValue);
+    setSaved(false);
+    if (!res.ok) {
+      setErrors(res.errors);
+      return;
+    }
+    setErrors({});
+    setSetting(db, KEY_NEAR_EXPIRY_DAYS, String(res.nearDays));
+    setSetting(db, KEY_RESTOCK_DAYS, String(res.restockDays));
+    // 不动库存，所以不需要结算；但必须刷新，否则 useQuery 拿的还是旧阈值
+    reload();
+    setSaved(true);
+  };
 
   const walOk = isWalDisabled(journalMode);
 
@@ -82,11 +117,32 @@ export default function SettingsScreen() {
 
       <SectionTitle>阈值</SectionTitle>
       <Card>
-        <Field label="快过期" value={`${info.thresholds.nearDays} 天内`} />
-        <Field label="需补货" value={`库存 ≤ ${info.thresholds.restockDays} 天`} />
+        <TextField
+          label="快过期"
+          value={nearValue}
+          onChangeText={(v) => {
+            setNear(v);
+            setSaved(false);
+          }}
+          keyboardType="number-pad"
+          error={errors.nearDays}
+          hint="天。首页把「这么多天内到期」的药标成黄色"
+        />
+        <TextField
+          label="需补货"
+          value={restockValue}
+          onChangeText={(v) => {
+            setRestock(v);
+            setSaved(false);
+          }}
+          keyboardType="number-pad"
+          error={errors.restockDays}
+          hint="天。库存预计还够用这么多天或更少时，进「需补货」"
+        />
+        <Button label="保存" onPress={save} />
+        {saved ? <Text style={styles.saved}>已保存。</Text> : null}
         <Text style={styles.tip}>
-          这两个数决定首页怎么分档。这一版只读 —— 改了会让首页和网页版对不上，
-          而「对得上」正是这一版的验收标准。
+          这两个数只影响首页怎么分档，不会改动任何库存 —— 调大调小都不会让药变少。
         </Text>
       </Card>
 
@@ -125,6 +181,7 @@ const styles = StyleSheet.create({
   actionLabel: { flex: 1, fontSize: font.base, fontWeight: '700', color: color.ink },
   actionHint: { fontSize: font.tiny, color: color.muted, lineHeight: 17, marginTop: space.xs },
   tip: { fontSize: font.tiny, color: color.muted, marginTop: space.sm, lineHeight: 17 },
+  saved: { fontSize: font.small, color: tone.ok.text, marginTop: space.sm },
   bad: { color: tone.danger.text, fontWeight: '700' },
   badNote: { fontSize: font.tiny, color: tone.danger.text, marginTop: space.sm, lineHeight: 17 },
   version: {
