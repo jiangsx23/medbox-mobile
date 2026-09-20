@@ -91,7 +91,7 @@ medbox-app/tests/ 745 行
 |---|---|
 | 开发机 | Windows 11 Pro（26200），bash |
 | 目标设备 | **小米8（codename `dipper`）**，骁龙845，**6GB RAM**，**arm64**，**Android 8.1（API 27）** |
-| 设备系统现状 | **出厂预装 MIUI 9.5.6，从未升级**。官方最后能到 Android 10 / MIUI 12.5.2 |
+| 设备系统现状 | **MIUI 10.0.11.0（`V10.0.11.0.OEACNFH`，stable，基于 Android 8.1 / `OPM1.171019.026`）**。⚠️ 2026-09-20 实机读出来的是 V10，与原先记录的「出厂 9.5.6、从未升级」**不符** —— 这台机器升过级。官方最后能到 Android 10 / MIUI 12.5.2 |
 | 是否升级系统 | **不建议为了这个 App 去升级**。MIUI 12 的自启动管控反而更严，且跨版本升级本身有风险。停在 8.1 完全能用 |
 | 网页版数据 | `../medbox-app/data/medbox.db`（73728 字节） |
 | 迁移源文件 | **`D:\Downloads\all.json`**（33848 字节，`version: 1`，导出于 `2026-09-16T13:23:58`） |
@@ -461,7 +461,64 @@ cd android && ./gradlew assembleRelease
 
 **首次构建极慢**（实测 **6 小时 56 分**）：要下载 Android NDK（约 1 GB，落到 `D:\Android\Sdk\ndk\`）并从源码编译全部原生模块。之后是增量构建，快得多。
 
+#### 只改了 JS 时：**不要跑 `prebuild`**（2026-09-20 实测）
+
+原生侧一行没动时（`app.json` / `app.config.*` / `package.json` 全是干净），第 1、2 步是**纯风险** ——
+`prebuild` 会把 `android/` 整个删掉、连带签名配置一起丢，然后触发一次全量编译。
+直接增量：
+
+```bash
+cd android && ./gradlew assembleRelease   # 实测 1m 23s
+```
+
+判断依据是一条命令：`git log --since=<上次出包日期> --name-only -- app.json app.config.* package.json` ——
+**空的就跳过 prebuild**。
+
+⚠️ **`packageRelease` 的增量状态会坏**（实测 2026-09-20）：报
+`PackageAndroidArtifact$IncrementalSplitterRunnable` 失败，而且**会把上一版 APK 一起清掉**。
+**原样重跑一次就好**（1m40s 失败 → 1m23s 成功），**不用 `clean`**（那会退化成全量编译）。
+
 ⚠️ **构建日志不要接 `| tail`** —— 管道的退出码会掩盖 gradle 的真实退出码，失败的构建会显示成 `exited with code 0`。把日志写文件，再单独 `echo $?`。
+（同一天还踩了它的变体：后台任务报「退出码 0」，日志里却是 `EXIT=1` —— 因为命令末尾还有个 `echo`。
+**真实退出码必须自己写进日志**。）
+
+#### 出包后必做：验签
+
+跳过 `prebuild` 时尤其要验 —— **别信 `build.gradle` 里的配置，直接问 APK**：
+
+```bash
+"$ANDROID_HOME/build-tools/36.0.0/apksigner.bat" verify --print-certs \
+  android/app/build/outputs/apk/release/app-release.apk
+# 正式密钥 → CN=medbox, OU=family, O=medbox, C=CN（debug 密钥会写 CN=Android Debug）
+```
+
+更硬的核法是与密钥库对指纹（`storepass` 见 `android/app/build.gradle`，**不是** `medbox2026`）：
+
+```bash
+"$JAVA_HOME/bin/keytool" -list -v -keystore keys/medbox-release.keystore \
+  -storepass REDACTED -alias medbox | grep SHA256
+```
+
+2026-09-20 核过：APK 与密钥库都是 `4C:CF:B4:79…F6:D0`。**这一条不能省** —— 签名不对的包
+装上去，将来无法覆盖升级，只能卸载重装 = 本地数据库全丢。
+
+#### 用 adb 往手机里放文件：**Git Bash 会偷偷改写路径**
+
+```bash
+adb push x.apk /sdcard/Download/          # ❌ /sdcard 被 MSYS 改写成 C:/Program Files/Git/sdcard/
+```
+
+更坏的是它会打印 **`1 file pushed`** —— 看着像成功，其实写到了别的地方。
+（2026-09-20 实测：`adb shell ls -l /sdcard/Download/` 里两个文件都不在。）
+
+正确写法：**源路径用 `D:/…` 形式，目标路径保持 `/sdcard/…`，并禁掉路径转换**：
+
+```bash
+export MSYS_NO_PATHCONV=1
+adb push D:/Downloads/all.json /sdcard/Download/all.json
+```
+
+推完**必须 `adb shell ls -l` 核一遍**，别信那句 `pushed`。
 
 ### 8.3 🔴 已知卡点：Windows 260 字符路径上限
 
@@ -1026,9 +1083,10 @@ rebaselineNoSettle(today)                // 只重设，**不收 batches**
 | 3 | **首次切换的时机** | 未定。原则：App 成熟后导一次 JSON 冷切换，之后网页版**封存不再写入** |
 | 4 | **git 初始化** | ✅ **已做**（2026-09-16，commit `4487a1e`）。身份已设为 `jiangsx23 <jiangsx23@163.com>`（global），提交时不必再问 |
 | 5 | **药品档案 CRUD（新建/编辑/删除）** | ✅ **已完成**（2026-09-18，`716d3de`），见 §8.6。顺带关掉了一条断头路（「单位没填」时界面让用户去「编辑档案」，而那个界面原先不存在） |
-| 6 | **M1 第 9 项**（装到小米8 核数量） | 🔴 **仍卡着** —— APK 已出并验签（2026-09-17 13:29 重建），但设备没连上（`adb devices` 空）。需要插上手机开 USB 调试。**这是唯一能证明「电脑上过 ≠ 手机上过」这一步不成立的办法**。§8.6 那个 `Executor` 的坑又给这条加了一个理由。**手机这几天能插上，所以 §8.7 做完后紧接着重新出包**，一次覆盖 §8.6 与 §8.7 的全部改动 |
+| 6 | **M1 第 9 项**（装到小米8 核数量） | 🟠 **2026-09-20 大幅推进，但还差最后一步** —— 手机连上了（`bfee7f5  device`，`product:dipper`），实机信息核对与 §4 一致；新包已出（`1m 23s`，含 §8.6 + §8.7 全部改动）并**验签通过**（指纹与密钥库一致）。**卡在 MIUI 的 USB 安装限制**，见下 |
 | 7 | **设置页的两个阈值不能改**（90 天 / 15 天） | ✅ **已完成**（2026-09-18，`9f41765`），见 §8.6 |
 | 8 | **暂停服药 / 恢复服药**（M4 最后一项） | ✅ **已完成**（2026-09-20），见 §8.7。**M4 到此无剩余项**。已知瑕疵（跨单位时不结清、暂停/恢复本身不留痕）记在该节，不修 |
+| 9 | **MIUI 拦住 adb 安装**（装机验收的最后一道） | 🔴 **需要 SIM 卡 + 小米账号，本机办不到**。`adb install` 报 `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` —— 是 MIUI 自己加的锁，**不是我们的包有问题**。解法是开发者选项里的两项：「**USB 调试（安全设置）**」与「**通过 USB 安装**」，而 MIUI 要求登录小米账号 + 插 SIM 卡 + 联网才肯打开（症状：开关打开后自己弹回关闭）。**临时绕法**：APK 已经推到 `/sdcard/Download/`，用手机的文件管理 →「安装包」/「Download」直接点装（代价是每次出包都要手点一遍）。<br>**验收数字**（`test/golden.test.ts` 钉死，别凭印象）：3 成员 / 37 药品 / 44 批次 / 合计 **2118** 单位；首页四格 = 在库 44 / 快过期 1 / 已过期 0 / 未填效期 13；**6 个三高药的 `auto_from` 被重设成导入当天**（§6.1 那个「不重设会一次扣爆」的坑）；38 条在库批次没有入库记录（存量例外，§6.9） |
 
 ---
 

@@ -56,7 +56,8 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 
 ## 目标设备
 
-**小米8**（codename `dipper`），骁龙845，6GB RAM，**arm64**，**Android 8.1（API 27）**，出厂预装 MIUI 9.5.6 从未升级。
+**小米8**（codename `dipper`），骁龙845，6GB RAM，**arm64**，**Android 8.1（API 27）**，
+**MIUI 10.0.11.0**（⚠️ 2026-09-20 实机读出来是 V10，与文档原先记的「出厂 9.5.6 从未升级」不符 —— 升过级）。
 
 - Android 8.1 **支持**（Expo SDK 54–57 要求 Android 7+，RN `minSdk` 24）。
 - 8.1 反而更省事：**不需要** `POST_NOTIFICATIONS` 运行时权限、**不需要** `SCHEDULE_EXACT_ALARM`。
@@ -108,15 +109,24 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
   所以暂停**自己先结清**（否则跨午夜那一整天的量会被恢复动作一笔勾销）。
   已知瑕疵（跨单位时不结清、暂停/恢复本身不留痕）见 DESIGN.md §8.7
 
-`tsc` 干净、**245 条测试全过**。APK 已出并验签
-（`android/app/build/outputs/apk/release/app-release.apk`，61 MB，2026-09-17
-—— **不含 2026-09-18 与 09-20 的改动**，下次出包会带上）。
+`tsc` 干净、**245 条测试全过**。**新 APK 已出并验签**
+（`android/app/build/outputs/apk/release/app-release.apk`，61 MB，**2026-09-20 14:19**
+—— 含 §8.6 + §8.7 的全部改动；指纹与 `keys/medbox-release.keystore` 一致）。
 
-### 🔴 唯一还卡着的一件事：M1 清单第 9 项 —— 装机验收
+### 🟠 唯一还卡着的一件事：M1 清单第 9 项 —— 装机验收
 
-`adb devices` 是空的，**手机没插上**。这是唯一能证明「电脑上过 ≠ 手机上过」这一步不成立的办法 ——
+**手机已经连上了**（`adb devices` → `bfee7f5  device  product:dipper`，实机 Android 8.1 / arm64 与
+DESIGN.md §4 一致），APK 也已推送到手机的 `/sdcard/Download/`。现在卡在 **MIUI 自己的安装锁**：
+
+```
+INSTALL_FAILED_USER_RESTRICTED: Install canceled by user
+```
+
+解法是开发者选项里的「USB 调试（安全设置）」+「通过 USB 安装」，而 **MIUI 要求 SIM 卡 + 小米账号 + 联网**
+才肯打开 —— 本机暂时办不到。详见 DESIGN.md §9 第 9 项（含验收要对的全部数字）。
+
+这是唯一能证明「电脑上过 ≠ 手机上过」这一步不成立的办法 ——
 而 DESIGN.md §8.4 记的那个驱动键名 bug 恰好说明了这两个环境**真的不一样**。
-需要：小米8 用 USB 插上、开 USB 调试。
 
 （曾经的 260 字符路径卡点**已解决** —— 换掉 Android SDK 自带的旧 ninja 即可，
 完整步骤与「为什么网上说的挪短路径/云构建在我们这儿全都无效」见 DESIGN.md §8.3。
