@@ -20,7 +20,7 @@
  * 对象里，而且那个类型里根本没有账本字段可写。靠纪律不如靠类型。
  */
 import type { AutoBatch, AutoMedicine } from './autodose';
-import { planRebaseline } from './autodose';
+import { planRebaseline, planSettlement, rebaselineNoSettle } from './autodose';
 import type { CalendarDay } from './calendar';
 import type { Plan } from './stock';
 import { mergeSettlement } from './stock';
@@ -311,8 +311,106 @@ export function planMedicineUpdate(
     //
     // 只改通用名/单位/归属时 autoChanged 为假，这里一句都不跑 ——
     // 否则用户改个错别字就会触发一次自动扣减 + 一条时间线记录。
-    mergeSettlement(plan, planRebaseline(prev, inStock, today, true), prev);
+    mergeSettlement(plan, planRebaseline(prev, inStock, today), prev);
   }
 
   return { ok: true, fields, plan };
+}
+
+// ── 暂停服药 / 恢复服药 ────────────────────────────────────────────────
+
+/**
+ * 暂停 / 恢复是**状态转换**，不是 setter —— 已经在了就拒绝。
+ *
+ * ⚠️ 判据顺序：**先看目标状态本身，再看开关**。反过来的话，一个
+ * 「暂停中 → 进编辑档案把自动扣减关掉」留下的行（`autoDeduct=false` 且
+ * `autoPaused=true`，见 `fieldsFrom` 最后一行）会让 resume 报出
+ * 「这个药没有在暂停中」—— 而那一行上 `autoPaused` 明明是 1。
+ * **报错可以，说假话不行。**
+ *
+ * 上游一行守卫都没有（只判「药不存在」），靠模板 `{% if med.auto_deduct %}`
+ * 隐藏按钮。这里加，是因为两个方向**不对称**：「已经暂停了再暂停」是无害空操作
+ * （`planSettlement` 见到 `autoPaused` 会返回 `untouched`），而
+ * 「**没暂停就恢复**」会把起算日推到今天、账本归零，**欠账却没结清** —— 静默抹账。
+ *
+ * 最后那条 `!autoDeduct` 买的是**语义清楚**，不是安全：没开自动扣减时那个 flag
+ * 本来就不生效（`planSettlement` 第一个分支就短路了）。别把它当安全措施记。
+ */
+function transitionError(prev: AutoMedicine, target: 'pause' | 'resume'): string | null {
+  if (target === 'pause') {
+    if (prev.autoPaused) return '这个药已经在暂停中了。';
+  } else if (!prev.autoPaused) {
+    return '这个药没有在暂停中，不需要恢复。';
+  }
+  if (!prev.autoDeduct) return '这个药没有开启自动扣减，不需要暂停或恢复。';
+  return null;
+}
+
+/**
+ * 暂停服药：**先把欠的账按当前参数结清，再让这个药停扣**。
+ *
+ * ── 这里刻意偏离上游 ─────────────────────────────────────────────────
+ * 上游的暂停 handler（`routes/medicines.py`）只有一句 `med.auto_paused = True`，
+ * 一行账本都不碰。它是对的，因为结算来自**请求级的 `_settle` 依赖** ——
+ * 每个请求之前都先把这个药结清到今天。
+ *
+ * 本仓库没有那个依赖：对应的闸门（`DbProvider` → `settleAll`）只在
+ * **冷启动 / 每次回前台**跑。照抄上游会漏掉这一段：
+ *
+ *     9/19 上午开门（闸门结算到 9/19）→ App 一直留在前台 → 跨过午夜
+ *     → 9/20 00:30 用户点「暂停」→ 9/20 那一整天的量从没被核算过
+ *     → 恢复时 `rebaselineNoSettle` 把它一笔勾销
+ *
+ * 所以暂停自己先结清。关键性质：它与闸门**完全等价、且幂等** ——
+ * 闸门今天已经跑过时 `pendingDeduction` 得 0，方案是空的、什么都不写。
+ * 换言之这一步**在绝大多数情况下是空操作**，只在上面那种缝隙里才真的扣。
+ *
+ * 不这么做的代价是**暂停会变成一条抹账的路径**，而 `planMedicineUpdate` 的注释
+ * 已经把这条原则写死了：旧账是真实发生过的，一笔勾销等于白送用户几天的药。
+ *
+ * ── 已知缺口：跨单位时结不了清 ────────────────────────────────────────
+ * `planSettlement` 遇到「在库批次单位不统一」会返回 `untouched(med, true)`
+ * （跨单位相加没有意义），而 `mergeSettlement` **不看** `skippedByUnitConflict` ——
+ * 于是方案是空的，**只有标志位落库**：这一下并没有结清，而恢复会把欠账一起吞掉。
+ *
+ * 不暂停的话那笔账只是**延迟**（用户统一单位后，下一次闸门就扣）；暂停之后变成**删除**。
+ * 这里不堵（因为数据质量问题让用户停不掉药，比少扣几片糟得多），
+ * 而是**写进界面的确认文案**：「单位不统一时算不出，会跳过」那句话就是为它写的。
+ * 见 DESIGN.md §8.7。
+ */
+export function planPause(
+  prev: AutoMedicine,
+  inStock: readonly AutoBatch[],
+  today: CalendarDay,
+): { ok: true; plan: Plan } | { ok: false; errors: Record<string, string> } {
+  const err = transitionError(prev, 'pause');
+  if (err) return { ok: false, errors: { _: err } };
+
+  const plan: Plan = { patches: [], events: [] };
+  // 用 `planSettlement` 而不是 `planRebaseline` —— 暂停**不重设起算日**，
+  // 只把欠的账结掉（`planSettlement` 只在算不出 / 扣不够时才推起算日）。
+  mergeSettlement(plan, planSettlement(prev, inStock, today), prev);
+  return { ok: true, plan };
+}
+
+/**
+ * 恢复服药：**一片都不扣**，只把起算日设成今天、已核算消耗归零。
+ *
+ * 停药那段整个作废 —— 先结清会把停药期间该吃的药一次性补扣回来，
+ * 与「暂停」的意图正好相反（`requirements.md` §3.6 的另一半）。
+ *
+ * 注意它**不收 `inStock`**：`rebaselineNoSettle` 没有库存可扣（见那里的注释）。
+ * 账本由 `mergeSettlement` 写 —— 起算日已经是今天、已核算本来就是 0 时它**不写**，
+ * 那时「恢复」只翻标志位。这是对的，不是漏写。
+ */
+export function planResume(
+  prev: AutoMedicine,
+  today: CalendarDay,
+): { ok: true; plan: Plan } | { ok: false; errors: Record<string, string> } {
+  const err = transitionError(prev, 'resume');
+  if (err) return { ok: false, errors: { _: err } };
+
+  const plan: Plan = { patches: [], events: [] };
+  mergeSettlement(plan, rebaselineNoSettle(today), prev);
+  return { ok: true, plan };
 }

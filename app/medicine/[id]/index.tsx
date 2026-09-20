@@ -13,13 +13,16 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { pauseMedicine, resumeMedicine, type MedicineResult } from '../../../src/data/medicines';
 import { medicineDetail } from '../../../src/data/queries';
 import { BATCH_STATUS_LABELS, EVENT_LABELS } from '../../../src/domain/constants';
 import { formatDose } from '../../../src/domain/forecast';
 import { toLocalDisplay } from '../../../src/domain/instant';
-import { Card, Empty, ExpiryPill, Pill, SectionTitle } from '../../../src/ui/components';
+import { Card, Empty, ExpiryPill, MiniButton, Pill, SectionTitle, confirm } from '../../../src/ui/components';
+import { useDb } from '../../../src/ui/DbProvider';
 import { BatchOps } from '../../../src/ui/stockops';
 import { useQuery } from '../../../src/ui/useQuery';
 import { color, font, radius, screen, space, text, tone } from '../../../src/ui/theme';
@@ -40,6 +43,22 @@ export default function MedicineDetailScreen() {
   const router = useRouter();
 
   const d = useQuery((db, today) => medicineDetail(db, medicineId, today), [medicineId]);
+
+  // ⚠️ `useQuery` 不返回 `reload`，得单独取一次 `useDb()`。
+  // 这里只用它拿 `db` 和 `reload`，**绝不要拿 `today` 传下去** ——
+  // 它是缓存值，而暂停/恢复的日期错了不会自愈（见 `src/data/medicines.ts:167`）。
+  const { db, reload } = useDb();
+  const [opError, setOpError] = useState<string | null>(null);
+
+  /** 跑一次暂停/恢复；失败就地显示一行错误（不弹窗），成功就让闸门重跑。 */
+  const runOp = (res: MedicineResult): void => {
+    if (!res.ok) {
+      setOpError(res.errors._ ?? Object.values(res.errors)[0] ?? '操作没成功。');
+      return;
+    }
+    setOpError(null);
+    reload();
+  };
 
   if (!d.found) {
     return (
@@ -132,6 +151,46 @@ export default function MedicineDetailScreen() {
               <Text style={text.muted}>未开启自动扣减 —— 需要每天手动记「取用」。</Text>
             )}
           </View>
+
+          {/* 暂停 / 恢复。**只在开着自动扣减时出现** —— 没开的药本来就不扣，
+              给个「暂停」按钮只会让人以为它之前一直在扣。
+              两个方向是状态转换：按钮跟着状态变，所以够不到「重复暂停 / 凭空恢复」。 */}
+          {m.autoDeduct ? (
+            <View style={[styles.line, styles.mt]}>
+              {m.autoPaused ? (
+                <MiniButton
+                  label="恢复服药"
+                  icon="play-outline"
+                  onPress={() =>
+                    confirm(
+                      '恢复服药？',
+                      // Alert 不认 markdown，别在这里写 **加粗**
+                      '从今天重新起算，停药期间一片都不补扣。',
+                      '恢复服药',
+                      () => runOp(resumeMedicine(db, medicineId)),
+                    )
+                  }
+                />
+              ) : (
+                <MiniButton
+                  label="暂停服药"
+                  icon="pause-outline"
+                  onPress={() =>
+                    confirm(
+                      '暂停服药？',
+                      '停药期间不再自动扣减。\n\n' +
+                        '暂停前会先结清欠的账（在库记录单位不统一时算不出，会跳过）。' +
+                        '恢复时从当天重新起算。',
+                      '暂停服药',
+                      () => runOp(pauseMedicine(db, medicineId)),
+                    )
+                  }
+                />
+              )}
+            </View>
+          ) : null}
+
+          {opError ? <Text style={styles.error}>{opError}</Text> : null}
 
           {/* 单位混用时「合计」这个数字是假的，必须说出来，
               否则用户会拿一个没有意义的数去做决定 */}
@@ -285,6 +344,7 @@ const styles = StyleSheet.create({
   lineSpaced: { marginTop: space.md },
   strong: { fontWeight: '700', color: color.ink },
   conflict: { fontSize: font.small, color: tone.danger.text, marginTop: space.md, lineHeight: 20 },
+  error: { fontSize: font.small, color: tone.danger.text, marginTop: space.sm },
 
   qtyBig: { fontSize: font.title, fontWeight: '700', color: color.ink },
   qtyUnit: { fontSize: font.base, fontWeight: '400', color: color.muted },

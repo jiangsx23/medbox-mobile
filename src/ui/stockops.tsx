@@ -12,40 +12,18 @@
  * `Alert.prompt` **只有 iOS 有**。用它写出来的输入框在小米8（安卓）上
  * 会静默地什么都不弹 —— 不是报错，是没反应，最难查的那种。
  */
-import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import type { Batch } from '../db/schema';
 import { discard, markExpired, restock, take, usedUp } from '../data/stock';
 import { BATCH_IN_STOCK } from '../domain/constants';
 import type { OpResult } from '../domain/stock';
+import { MiniButton, confirm } from './components';
 import { useDb } from './DbProvider';
 import { Button, Sheet, TextField } from './form';
-import { color, font, radius, space, text, tone } from './theme';
-
-/** 小号操作按钮。 */
-function MiniButton({
-  label,
-  onPress,
-  icon,
-  danger,
-}: {
-  label: string;
-  onPress: () => void;
-  icon?: keyof typeof Ionicons.glyphMap;
-  danger?: boolean;
-}) {
-  return (
-    <Pressable style={styles.mini} onPress={onPress}>
-      {icon ? (
-        <Ionicons name={icon} size={14} color={danger ? tone.danger.text : color.brand} />
-      ) : null}
-      <Text style={[styles.miniText, danger && styles.miniTextDanger]}>{label}</Text>
-    </Pressable>
-  );
-}
+import { color, font, space, text, tone } from './theme';
 
 export function BatchOps({ batch }: { batch: Batch }) {
   const { db, today, reload } = useDb();
@@ -68,13 +46,6 @@ export function BatchOps({ batch }: { batch: Batch }) {
     setReason('');
     // 闸门重跑 → 版本号 +1 → 详情页与首页一起刷新
     reload();
-  };
-
-  const confirm = (title: string, message: string, label: string, act: () => void, danger = false) => {
-    Alert.alert(title, message, [
-      { text: '取消', style: 'cancel' },
-      { text: label, style: danger ? 'destructive' : 'default', onPress: act },
-    ]);
   };
 
   return (
@@ -205,19 +176,6 @@ export function BatchOps({ batch }: { batch: Batch }) {
 const styles = StyleSheet.create({
   wrap: { marginTop: space.md },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, alignItems: 'center' },
-  mini: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    borderWidth: 1,
-    borderColor: color.line,
-    backgroundColor: color.card,
-    borderRadius: radius.sm,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  miniText: { fontSize: font.tiny, color: color.brand, fontWeight: '600' },
-  miniTextDanger: { color: tone.danger.text },
   hint: { fontSize: font.tiny, color: color.muted, flexShrink: 1 },
   error: { fontSize: font.small, color: tone.danger.text, marginTop: space.sm },
   sheetLead: { marginBottom: space.lg },

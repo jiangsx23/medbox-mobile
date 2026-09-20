@@ -131,8 +131,18 @@ function untouched(med: AutoMedicine, skippedByUnitConflict = false): Settlement
   };
 }
 
-/** 只把起算日推到今天、账本归零，不扣任何东西。 */
-function rebaselineOnly(today: CalendarDay): Settlement {
+/**
+ * 只把起算日推到今天、账本归零，**不扣任何东西**。
+ *
+ * 两个地方用它，语义是同一个：「这段账算不出来（或不该算），那就从今天重新开始」——
+ * - `planSettlement` 内部：起算日没初始化 / 在未来，或者库存见底（断货期不计消耗）
+ * - **「暂停后恢复服药」**（`planResume`）：停药那段整个作废
+ *
+ * ⚠️ 它**故意不收 `batches`**：这里根本没有「可扣的库存」这回事。
+ * 「只重设、不结清」这条路径拿不到库存，也就**想结清都结不成** ——
+ * 靠类型而不是靠纪律。这正是从 `planRebaseline` 里把这个用途拆出来的理由。
+ */
+export function rebaselineNoSettle(today: CalendarDay): Settlement {
   return { takes: [], totalTaken: 0, autoFrom: today, autoAccounted: 0, reason: null, skippedByUnitConflict: false };
 }
 
@@ -158,14 +168,14 @@ export function planSettlement(
   if (med.dailyDose === null || med.dailyDose <= 0) return untouched(med);
 
   // 未初始化，或系统时间被改到了起算日之前 —— 重设到今天就别扣了
-  if (med.autoFrom === null || compareDays(med.autoFrom, today) > 0) return rebaselineOnly(today);
+  if (med.autoFrom === null || compareDays(med.autoFrom, today) > 0) return rebaselineNoSettle(today);
 
   // 跨单位相加是错的，宁可不扣（详情页会显示原因）
   if (unitsConflict(batches)) return untouched(med, true);
 
   const stock = batches.reduce((s, b) => s + b.qty, 0);
   // 断货期不计消耗：没药吃的日子作废，补货后从那天重新算
-  if (stock <= 0) return rebaselineOnly(today);
+  if (stock <= 0) return rebaselineNoSettle(today);
 
   const need = pendingDeduction(diffDays(med.autoFrom, today), med.dailyDose, med.autoAccounted);
   if (need <= 0) return untouched(med);
@@ -196,25 +206,27 @@ export function planSettlement(
 }
 
 /**
- * 把起算日推到今天、账本归零。**唯一**允许重设账本的地方。
+ * 先按**调用时的参数**把手上的库存结清，再把起算日推到今天、账本归零。
+ * **唯一**允许重设账本的地方。
  *
- * `settleFirst = true`：先用**调用时的参数**把手上的库存结清，再重设。
- *   用于 入库 / 恢复在库 / 编辑数量 / 改每日用量 —— 这些场景旧账是真实发生过的，
- *   一笔勾销会让系统以为「少吃了几片」，可用天数偏大。
- *
- * `settleFirst = false`：只重设，不结清。用于「暂停后恢复服药」——
- *   结清会把停药期间该吃的药一次性补扣回来，与「暂停」的意图正好相反。
+ * 用于 入库 / 恢复在库 / 编辑数量 / 改每日用量 —— 这些场景旧账是真实发生过的，
+ * 一笔勾销会让系统以为「少吃了几片」，可用天数偏大。
  *
  * ⚠️ 调用方必须在**赋新值之前**调用，否则会拿新参数去结旧账
  * （把每日用量 1 改成 2 时，会按 2 重算过去 N 天，一次补扣一大笔）。
+ *
+ * ⚠️ 「**不**结清的重设」不在这个函数里，那是 `rebaselineNoSettle(today)`。
+ * 这里曾经有一个 `settleFirst` 布尔参数，拆掉是因为：它的 6 个生产调用点
+ * **全都传 `true`**（一个永远为真的参数在调用点上不携带信息，只招人来传错），
+ * 而唯一该传 `false` 的用途是「恢复服药」—— 那一支的执行体根本不读 `batches`，
+ * 收下库存参数只会让人以为它读了。
  */
 export function planRebaseline(
   med: AutoMedicine,
   batches: readonly AutoBatch[],
   today: CalendarDay,
-  settleFirst = true,
 ): Settlement {
-  const base = settleFirst ? planSettlement(med, batches, today) : untouched(med);
+  const base = planSettlement(med, batches, today);
   // 结算自己也可能重设（扣不够时），但结果与这里一致，直接覆盖
   return { ...base, autoFrom: today, autoAccounted: 0 };
 }

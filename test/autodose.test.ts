@@ -19,6 +19,7 @@ import {
   pendingDeduction,
   planRebaseline,
   planSettlement,
+  rebaselineNoSettle,
   unitsConflict,
 } from '../src/domain/autodose';
 import { BATCH_EXPIRED, BATCH_IN_STOCK, BATCH_USED_UP } from '../src/domain/constants';
@@ -398,7 +399,7 @@ describe('账本对账', () => {
 
     // 第二步：赋新值；第三步：只重设基线，不结清
     w.med.dailyDose = 2;
-    apply(w, planRebaseline(w.med, live(w), TODAY, false));
+    apply(w, rebaselineNoSettle(TODAY));
 
     expect(w.med.autoFrom).toBe(TODAY);
     expect(w.med.autoAccounted).toBe(0);
@@ -416,7 +417,7 @@ describe('账本对账', () => {
     expect(settle(w).totalTaken).toBe(0);
 
     w.med.autoPaused = false;
-    apply(w, planRebaseline(w.med, live(w), TODAY, false));
+    apply(w, rebaselineNoSettle(TODAY));
 
     expect(b.qty).toBe(30); // 停药期间该吃的药没有被补扣回来
     expect(w.med.autoFrom).toBe(TODAY);
@@ -429,7 +430,7 @@ describe('账本对账', () => {
     const gone = box(w, 20, { status: BATCH_USED_UP });
 
     // 结算时 `gone` 还不在在库清单里 —— 这正是 planRestock 的顺序
-    apply(w, planRebaseline(w.med, live(w), TODAY, true));
+    apply(w, planRebaseline(w.med, live(w), TODAY));
     gone.status = BATCH_IN_STOCK;
 
     expect(w.med.autoFrom).toBe(TODAY);
@@ -442,7 +443,7 @@ describe('账本对账', () => {
     const w = world({ fromDaysAgo: 6 });
     const b = box(w, 10);
 
-    const s = apply(w, planRebaseline(w.med, live(w), TODAY, true));
+    const s = apply(w, planRebaseline(w.med, live(w), TODAY));
 
     expect(s.totalTaken).toBe(6);
     expect(b.qty).toBe(4);

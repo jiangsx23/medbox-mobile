@@ -17,6 +17,8 @@ import {
   createMedicine,
   deleteMedicine,
   medicineById,
+  pauseMedicine,
+  resumeMedicine,
   updateMedicine,
 } from '../src/data/medicines';
 import { deleteMember, ownedMedicineCount } from '../src/data/members';
@@ -35,7 +37,7 @@ import {
 } from '../src/data/stock';
 import type { MedboxDb } from '../src/db/client';
 import { batches, medicines, members, settings, stockEvents } from '../src/db/schema';
-import { addDays } from '../src/domain/calendar';
+import { addDays, diffDays, today as todayDay } from '../src/domain/calendar';
 import {
   BATCH_IN_STOCK,
   BATCH_USED_UP,
@@ -747,5 +749,159 @@ describe('药品档案', () => {
     const db = freshDb();
     const res = deleteMedicine(db, 999);
     expect(res.ok).toBe(false);
+  });
+});
+
+// ══ 暂停服药 / 恢复服药 ════════════════════════════════════════════════
+//
+// 纯规则（扣多少、守卫措辞、起算日动不动）在 `test/medicine.test.ts` 里测。
+// 这里测的是**落库之后到底发生了什么** —— 尤其「结算与标志位在同一个事务里」
+// 这一条：只落了结算没落标志位的话，那个药会带着「已经结清」的账本继续按天扣。
+
+describe('暂停 / 恢复', () => {
+  it('暂停：按天扣、写 auto_take 事件、置标志位，而**起算日不动**', () => {
+    const db = freshDb();
+    const m = autoMed(db, 10); // 每日 1、起算日 10 天前、已核算 0
+    const b = box(db, m, 30);
+
+    const res = pauseMedicine(db, m, TODAY, NOW);
+    expect(res.ok).toBe(true);
+
+    expect(qtyOf(db, b)).toBe(20);
+    expect(lastEvent(db, b).type).toBe(EVENT_AUTO);
+    expect(medicineById(db, m)!.autoPaused).toBe(true);
+    // ⚠️ 这条是分水岭：暂停**不重设基线**。用 planRebaseline 的话会是 (TODAY, 0)，
+    // 那是「编辑档案」的语义 —— 用户改了剂量才该那样。
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: addDays(TODAY, -10), autoAccounted: 10 });
+
+    assertInvariant1(db);
+  });
+
+  it('恢复：库存**一片都不动**，只把起算日设成今天、已核算归零', () => {
+    const db = freshDb();
+    const m = med(db, {
+      autoDeduct: true,
+      autoPaused: true,
+      dailyDose: 1,
+      autoFrom: addDays(TODAY, -30),
+      autoAccounted: 0,
+    });
+    const b = box(db, m, 30);
+    const before = eventCount(db);
+
+    const res = resumeMedicine(db, m, TODAY, NOW);
+    expect(res.ok).toBe(true);
+
+    expect(qtyOf(db, b)).toBe(30); // ← 全部承诺就在这一行
+    expect(eventCount(db)).toBe(before); // 一条变动记录都不写
+    expect(medicineById(db, m)!.autoPaused).toBe(false);
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: TODAY, autoAccounted: 0 });
+
+    // 刻意不调 assertInvariant1：这里断言的正是「一条事件都没写」，
+    // 而 box() 造的批次本来就没有事件（模拟导入的存量数据，§6.9 的例外）。
+  });
+
+  it('暂停 → 隔几天 → 恢复：停药期间一片不扣，恢复后从当天重新开始扣', () => {
+    // 这是这个功能对用户的**全部承诺**，端到端走一整圈。
+    const db = freshDb();
+    const m = autoMed(db, 10);
+    const b = box(db, m, 30);
+
+    // 9/14 暂停：结清这 10 天
+    expect(pauseMedicine(db, m, TODAY, NOW).ok).toBe(true);
+    expect(qtyOf(db, b)).toBe(20);
+
+    // 停药 5 天。闸门在这期间照常跑（冷启动 / 回前台），但它会跳过这个药
+    expect(settleAll(db, addDays(TODAY, 5), NOW)).toBe(0);
+    expect(qtyOf(db, b)).toBe(20); // 一片都没动
+
+    // 9/19 恢复：从当天重新起算
+    expect(resumeMedicine(db, m, addDays(TODAY, 5), NOW).ok).toBe(true);
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: addDays(TODAY, 5), autoAccounted: 0 });
+    expect(qtyOf(db, b)).toBe(20);
+
+    // 再隔一天才重新开始扣，且只扣一天
+    expect(settleAll(db, addDays(TODAY, 6), NOW)).toBe(1);
+    expect(qtyOf(db, b)).toBe(19);
+  });
+
+  it('暂停中的药**不再被闸门结算**（settleAll 的 filter）', () => {
+    const db = freshDb();
+    const m = autoMed(db, 0); // 起算日就是今天，按下去时无事可做
+    const b = box(db, m, 30);
+
+    expect(pauseMedicine(db, m, TODAY, NOW).ok).toBe(true);
+    const before = eventCount(db);
+
+    // 隔 7 天再跑闸门 —— 暂停的药必须一动不动
+    expect(settleAll(db, addDays(TODAY, 7), NOW)).toBe(0);
+    expect(qtyOf(db, b)).toBe(30);
+    expect(eventCount(db)).toBe(before);
+    // 而且连起算日都不该被推走：暂停的意图是整段作废，不是「从今天重算」
+    expect(ledgerOf(db, m)).toEqual({ autoFrom: TODAY, autoAccounted: 0 });
+  });
+
+  it('不传 today 时用的是**当天**（默认值 todayDay()，不是缓存的旧日期）', () => {
+    // 这两个动作的日期错了**不会自愈**：暂停用昨天结算 → 那一片永久消失。
+    // 所以签名上的默认值必须真的生效，而不是「反正界面会传」。
+    //
+    // ⚠️ 这条**不能**拿文件顶部的 TODAY 去算 —— 那是个固定夹具，而默认值取的是
+    // **真实当天**。所以期望值也从 `todayDay()` 现算：断言的是「结算走到了今天」，
+    // 而不是「走到了某个写死的日期」。
+    const db = freshDb();
+    const m = autoMed(db, 3);
+    const b = box(db, m, 30);
+
+    const autoFrom = addDays(TODAY, -3); // 相对夹具，与「今天」无关
+    expect(pauseMedicine(db, m).ok).toBe(true);
+
+    const expectedDays = diffDays(autoFrom, todayDay()); // diffDays(a, b) 是 b − a
+    // 起算日**不动**（暂停不重设基线），但账已经结到当天了
+    expect(ledgerOf(db, m)).toEqual({ autoFrom, autoAccounted: expectedDays });
+    expect(qtyOf(db, b)).toBe(30 - expectedDays);
+    // 兜底：真实当天与夹具差得离谱的话，上面的式子会自己成立而没有说服力
+    expect(expectedDays).toBeGreaterThan(0);
+  });
+
+  it('守卫失败时**一行都不写** —— 库存、账本、标志位、时间线全都原样', () => {
+    const db = freshDb();
+    const m = autoMed(db, 10);
+    const b = box(db, m, 30);
+    const before = eventCount(db);
+
+    // 没暂停就恢复
+    const a = resumeMedicine(db, m, TODAY, NOW);
+    expect(a.ok).toBe(false);
+    // 已经暂停了再暂停
+    expect(pauseMedicine(db, m, TODAY, NOW).ok).toBe(true);
+    const b2 = pauseMedicine(db, m, TODAY, NOW);
+    expect(b2.ok).toBe(false);
+
+    expect(qtyOf(db, b)).toBe(20); // 只有第一次暂停结的那次
+    expect(medicineById(db, m)!.autoPaused).toBe(true);
+    expect(eventCount(db)).toBe(before + 1); // 只有第一次暂停写的那一条
+  });
+
+  it('药品不存在时不静默成功', () => {
+    const db = freshDb();
+    expect(pauseMedicine(db, 999, TODAY, NOW).ok).toBe(false);
+    expect(resumeMedicine(db, 999, TODAY, NOW).ok).toBe(false);
+  });
+
+  it('暂停中的药进编辑页改名字并保存 → **仍然是暂停中**（与落库层是两件事，一起钉住）', () => {
+    const db = freshDb();
+    const m = autoMed(db, 0);
+    box(db, m, 30);
+    expect(pauseMedicine(db, m, TODAY, NOW).ok).toBe(true);
+
+    const res = updateMedicine(
+      db,
+      m,
+      mform({ generic: '改个错别字', dailyDose: '1', autoDeduct: true }),
+      TODAY,
+      NOW,
+    );
+    expect(res.ok).toBe(true);
+    expect(medicineById(db, m)!.autoPaused).toBe(true);
   });
 });

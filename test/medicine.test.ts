@@ -16,10 +16,13 @@ import {
   formOf,
   planMedicineCreate,
   planMedicineUpdate,
+  planPause,
+  planResume,
   type MedicineForm,
   type MedicineRow,
 } from '../src/domain/medicine';
-import type { AutoMedicine } from '../src/domain/autodose';
+import { afterTake, type AutoBatch, type AutoMedicine } from '../src/domain/autodose';
+import { addDays } from '../src/domain/calendar';
 
 const TODAY = '2026-09-14';
 
@@ -344,5 +347,167 @@ describe('formOf + 保存的往返 —— 「打开编辑页，碰都没碰，�
     const res = planMedicineUpdate(noUnit, [], formOf(noUnit), TODAY);
     if (res.ok) throw new Error('单位空着不该能存');
     expect(res.errors.unit).toBe('单位：请选择或填写单位');
+  });
+});
+
+// ══ 暂停服药 / 恢复服药 ════════════════════════════════════════════════
+//
+// 这一组测的是**两个方向的不对称**，也是全项目里唯一一处「日期取错不会自愈」
+// 的操作（见 `src/data/medicines.ts` 的 `pauseMedicine`）。落库效果
+// （真扣了几片、标志位、事件）在 `test/data.test.ts` 里测，这里不碰库。
+
+/** 一盒药。默认是「片」在库，够用即可 —— 这一组不关心效期排序（那在 autodose 里测）。 */
+function abox(qty: number, over: Partial<AutoBatch> = {}): AutoBatch {
+  return {
+    id: 1,
+    qty,
+    unit: '片',
+    expiryDate: null,
+    openedAt: null,
+    openLifeDays: null,
+    createdAt: 0,
+    status: 'in_stock',
+    ...over,
+  };
+}
+
+/** 一个开着自动扣减、起算日在 `fromDaysAgo` 天前的药。 */
+function auto(over: Partial<AutoMedicine> = {}): AutoMedicine {
+  return prev({ autoDeduct: true, dailyDose: 1, autoFrom: addDays(TODAY, -10), ...over });
+}
+
+describe('暂停 / 恢复', () => {
+  it('暂停：先把欠的账结清，且**起算日不动**（不重设基线）', () => {
+    // 起算日 10 天前、已核算 1、每日 1 → 该扣 9 片
+    const p = auto({ autoFrom: addDays(TODAY, -10), autoAccounted: 1 });
+    const res = planPause(p, [abox(30)], TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([{ id: 1, patch: { qty: 21 } }]);
+    expect(res.plan.events).toHaveLength(1);
+    expect(res.plan.events[0]).toMatchObject({ batchId: 1, deltaQty: -9, qtyAfter: 21 });
+
+    // ⚠️ 这条是「暂停 ≠ 改剂量」的分水岭：起算日仍是 10 天前，**不是今天**。
+    // 用 planRebaseline 的话这里会变成 (TODAY, 0) —— 那是「编辑档案」的语义。
+    expect(res.plan.ledger).toEqual({
+      medicineId: 7,
+      autoFrom: addDays(TODAY, -10),
+      autoAccounted: 10,
+    });
+  });
+
+  it('暂停：闸门今天已经结算过时是**空操作**（幂等，多跑无害）', () => {
+    // 这正是绝大多数情况：闸门在冷启动/回前台已经扣过，按下暂停时无事可做。
+    const p = auto({ autoFrom: TODAY, autoAccounted: 0 });
+    const res = planPause(p, [abox(30)], TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([]);
+    expect(res.plan.events).toEqual([]);
+    expect(res.plan.ledger).toBeUndefined();
+  });
+
+  it('暂停：一片库存都没有时起算日推到今天 —— 断货期不计消耗', () => {
+    const p = auto({ autoFrom: addDays(TODAY, -10), autoAccounted: 0 });
+    const res = planPause(p, [], TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([]);
+    expect(res.plan.events).toEqual([]);
+    expect(res.plan.ledger).toEqual({ medicineId: 7, autoFrom: TODAY, autoAccounted: 0 });
+  });
+
+  it('暂停：在库单位不统一时**方案整个是空的**（已知缺口，钉成行为而不是留给人猜）', () => {
+    // 跨单位相加没有意义 → planSettlement 返回 untouched(med, true)，
+    // 而 mergeSettlement 不看 skippedByUnitConflict（三者全等），
+    // 于是只有标志位会落库：**这一下并没有结清**，恢复会把欠账一起吞掉。
+    // 界面上的确认文案为此明说了「单位不统一时算不出，会跳过」。
+    const p = auto({ autoFrom: addDays(TODAY, -10), autoAccounted: 0 });
+    const res = planPause(p, [abox(30, { id: 1, unit: '片' }), abox(30, { id: 2, unit: '袋' })], TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([]);
+    expect(res.plan.events).toEqual([]);
+    expect(res.plan.ledger).toBeUndefined();
+  });
+
+  it('恢复：**一片都不扣**，只把起算日设成今天、已核算归零', () => {
+    // 这是这个功能对用户的全部承诺。用 planRebaseline（先结清）会扣 30 片。
+    const p = auto({ autoPaused: true, autoFrom: addDays(TODAY, -30), autoAccounted: 0 });
+    const res = planResume(p, TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([]);
+    expect(res.plan.events).toEqual([]);
+    expect(res.plan.ledger).toEqual({ medicineId: 7, autoFrom: TODAY, autoAccounted: 0 });
+  });
+
+  it('恢复：起算日已经是今天、已核算本来就是 0 时**不写账本**（只翻标志位）', () => {
+    // mergeSettlement 只在「和目标值不同」时写 ledger。这不是漏写：
+    // 落地层照样会把 autoPaused 置 false，恢复动作本身是生效的。
+    const p = auto({ autoPaused: true, autoFrom: TODAY, autoAccounted: 0 });
+    const res = planResume(p, TODAY);
+    if (!res.ok) throw new Error('不该失败');
+
+    expect(res.plan.patches).toEqual([]);
+    expect(res.plan.events).toEqual([]);
+    expect(res.plan.ledger).toBeUndefined();
+  });
+
+  it('暂停期间手动「取用」过的药，恢复后那几片**不会被算两次**（反直觉，但对的）', () => {
+    // `planTake` 的 afterTake 只判 autoDeduct、不判 autoPaused，所以停药期间
+    // 手动记的「取用」照样累加进账本。恢复时起算日一起被推到今天 ——
+    // 那一笔于是**被丢弃**而不是被追认。用户手动记的那几片仍然从库存里扣掉了，
+    // 只是不再计入自动扣减的账。
+    const paused = auto({ autoPaused: true, autoFrom: TODAY, autoAccounted: 0 });
+    const taken = afterTake(paused, 3);
+
+    expect(taken).toEqual({ autoFrom: TODAY, autoAccounted: 3 });
+
+    const res = planResume({ ...paused, autoAccounted: 3 }, TODAY);
+    if (!res.ok) throw new Error('不该失败');
+    expect(res.plan.ledger).toEqual({ medicineId: 7, autoFrom: TODAY, autoAccounted: 0 });
+    expect(res.plan.patches).toEqual([]);
+  });
+
+  it('守卫：没开自动扣减的药，两个动作都拒绝', () => {
+    const off = prev({ autoDeduct: false, autoPaused: false, dailyDose: 1, autoFrom: addDays(TODAY, -10) });
+
+    const a = planPause(off, [abox(30)], TODAY);
+    const b = planResume(off, TODAY);
+    expect(a.ok).toBe(false);
+    expect(b.ok).toBe(false);
+    // 措辞不同是因为**判据顺序是先状态后开关**（下一条专门钉这个顺序）：
+    // 这一行 autoPaused 是 0，所以 resume 报的是「没有在暂停中」—— 真话。
+    if (a.ok || b.ok) throw new Error('不该通过');
+    expect(a.errors._).toBe('这个药没有开启自动扣减，不需要暂停或恢复。');
+    expect(b.errors._).toBe('这个药没有在暂停中，不需要恢复。');
+  });
+
+  it('守卫：已经暂停了再暂停 → 拒绝；没暂停就恢复 → 拒绝', () => {
+    const already = auto({ autoPaused: true, autoFrom: addDays(TODAY, -10) });
+    const a = planPause(already, [abox(30)], TODAY);
+    if (a.ok) throw new Error('不该通过');
+    expect(a.errors._).toBe('这个药已经在暂停中了。');
+
+    const running = auto({ autoPaused: false, autoFrom: addDays(TODAY, -10) });
+    const b = planResume(running, TODAY);
+    if (b.ok) throw new Error('不该通过');
+    // 「没暂停就恢复」才是真正危险的那一边：起算日推到今天、账本归零，
+    // 而欠账没结清 —— 静默抹账。所以两个方向都拒绝，而不是只拦一边。
+    expect(b.errors._).toBe('这个药没有在暂停中，不需要恢复。');
+  });
+
+  it('守卫：judgement 顺序 —— 关掉开关留下的 stale autoPaused 报的是「没开自动扣减」', () => {
+    // 「先暂停 → 再进编辑档案关掉自动扣减」会留下 autoDeduct=false 且
+    // autoPaused=true 的行（见 fieldsFrom）。这条钉住判据是**先看目标状态、
+    // 再看开关**：反过来的话这里会报「这个药没有在暂停中」—— 而那一行上
+    // autoPaused 明明是 1。报错可以，说假话不行。
+    const stale = prev({ autoDeduct: false, autoPaused: true });
+    const res = planResume(stale, TODAY);
+    if (res.ok) throw new Error('不该通过');
+
+    expect(res.errors._).not.toContain('没有在暂停中');
+    expect(res.errors._).toBe('这个药没有开启自动扣减，不需要暂停或恢复。');
   });
 });

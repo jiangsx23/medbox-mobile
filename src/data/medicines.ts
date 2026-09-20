@@ -26,7 +26,8 @@ import type { MedboxDb } from '../db/client';
 import type { CalendarDay, Instant, Medicine } from '../db/schema';
 import { batches, medicines } from '../db/schema';
 import type { MedicineForm } from '../domain/medicine';
-import { planMedicineCreate, planMedicineUpdate } from '../domain/medicine';
+import { planMedicineCreate, planMedicineUpdate, planPause, planResume } from '../domain/medicine';
+import { today as todayDay } from '../domain/calendar';
 import { applyPlanOn, insertedId, loadOpContext } from './stock';
 
 /** 与 `MemberResult` 同形，界面上两条路走同一套错误渲染。 */
@@ -155,5 +156,66 @@ export function deleteMedicine(db: MedboxDb, id: number): MedicineResult {
   }
 
   db.delete(medicines).where(eq(medicines.id, id)).run();
+  return { ok: true, id };
+}
+
+// ── 暂停服药 / 恢复服药 ─────────────────────────────────────────────────
+
+/**
+ * 暂停服药。**结算与标志位在同一个事务里**，形状与 `updateMedicine` 相同。
+ *
+ * ⚠️ `today` 默认取**当场**的日期，**界面不要传 `useDb().today`**。
+ * `DbProvider` 的 `today` 是缓存值（`useState(() => todayDay())`），只在
+ * 冷启动 / 回前台 / 手动 reload 时更新；App 一直留在前台跨过午夜时它停在昨天。
+ *
+ * 对「取用 / 编辑数量」那类操作，这点偏差只会让账**晚一天**结 ——
+ * 下一次闸门就补上了，**会自愈**。对这两个动作**不会自愈**：
+ *
+ * - 暂停用昨天结算 → 今天那一片不扣 → 紧接着置 `autoPaused` → 闸门从此跳过它
+ *   → 恢复时账本又被覆盖成「今天 / 0」→ **那一片永久消失**
+ * - 恢复用昨天写 `autoFrom` → 下一次闸门按今天算 days=1，把停药期的最后一天
+ *   当成吃药的日子扣掉 —— 会真扣药，用户看得见
+ *
+ * 所以默认值就是 `todayDay()`。（`now = Date.now()` 本来就是同一个签名里的
+ * 时钟默认值，风格一致。测试照常显式传日期。）
+ */
+export function pauseMedicine(
+  db: MedboxDb,
+  id: number,
+  today: CalendarDay = todayDay(),
+  now: Instant = Date.now(),
+): MedicineResult {
+  const ctx = loadOpContext(db, id, today);
+  if (!ctx) return notFound();
+
+  const res = planPause(ctx.medicine, ctx.inStock, today);
+  if (!res.ok) return { ok: false, errors: res.errors };
+
+  db.transaction((tx) => {
+    // 先结清欠的账，再置标志位 —— 两件事必须同一个事务：
+    // 若结算落了库而标志位没落，这个药会带着「已经结清」的账本继续按天扣。
+    applyPlanOn(tx, res.plan, now);
+    tx.update(medicines).set({ autoPaused: true }).where(eq(medicines.id, id)).run();
+  });
+  return { ok: true, id };
+}
+
+/** 恢复服药：只重设账本，**一片都不扣**。规则与 `today` 的理由见 `planResume` 与上面那段。 */
+export function resumeMedicine(
+  db: MedboxDb,
+  id: number,
+  today: CalendarDay = todayDay(),
+  now: Instant = Date.now(),
+): MedicineResult {
+  const ctx = loadOpContext(db, id, today);
+  if (!ctx) return notFound();
+
+  const res = planResume(ctx.medicine, today);
+  if (!res.ok) return { ok: false, errors: res.errors };
+
+  db.transaction((tx) => {
+    applyPlanOn(tx, res.plan, now);
+    tx.update(medicines).set({ autoPaused: false }).where(eq(medicines.id, id)).run();
+  });
   return { ok: true, id };
 }
