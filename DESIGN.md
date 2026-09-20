@@ -874,7 +874,7 @@ autoWouldChange(prev, form)   // planMedicineUpdate（跑不跑结算）与提�
 
 ---
 
-### 8.7 M4 收尾：暂停服药 / 恢复服药（2026-09-20，commit `1bf8bc9`）
+### 8.7 M4 收尾：暂停服药 / 恢复服药（2026-09-20，commit `3c0abd4`）
 
 **M4 到此没有剩余项了。** `tsc` 干净，**245 条测试全过**（227 → 245，+18）。
 
