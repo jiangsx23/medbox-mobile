@@ -51,6 +51,7 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 | `minSdkVersion` | 24（Android 7.0，RN 0.76+ 的下限，免费拿到） |
 | `targetSdkVersion` | 36（Android 16） |
 | ABI | universal APK（`armeabi-v7a` + `arm64-v8a`），32/64 位都能装 |
+| `allowBackup` | `true`（Expo 模板显式写在 `android/app/src/main/AndroidManifest.xml:14`）。**实机验证可用** —— 这是本机唯一能读到 `/data/data` 里那个库的办法，见下「怎么读手机上的库」 |
 
 出包命令顺序、本机工具链路径、`prebuild` 会删掉 `android/` 的坑：见 `DESIGN.md` §8.2。
 
@@ -66,14 +67,74 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 - 🔴 **MIUI 会杀定时通知。** 装好后要走四步白名单（省电无限制 / 自启动 / 锁后台 / 通知设优先），App 里要做「通知自检」引导页。详细步骤见 DESIGN.md §6.6。
 - ⚠️ **Android 13+ 的通知权限流程、12+ 的精确闹钟权限，在这台设备上永远测不到** —— 给新手机用户前必须真机实测。
 
+2026-09-21 实机读出来的、写文档时值得先知道的一批属性：
+
+| 属性 | 实测值 | 后果 |
+|---|---|---|
+| `ro.debuggable` | **0** | `run-as`、`adb root` 全不可用，**读不到 `/data/data/com.medbox.family/`** |
+| `ro.secure` | **1** | 同上 |
+| `ro.build.type` | **user** | 整机是发行版，不是工程机 |
+| `persist.sys.timezone` | **`Asia/Shanghai`** | 与开发机同时区 —— 所以「今天」这个概念两边一致，但**别把这条当保证** |
+| `bmgr enabled` | **disabled** | ⚠️ 但 `adb backup` **照样能用**（实测成功）。「Backup Manager 关着」不等于 adb backup 不能用，别被这句话劝退 |
+| 型号 / 系统 | MI 8 / 8.1.0 (API 27) / `arm64-v8a` / MIUI **V10** | 与 §4 一致 |
+
+### 怎么读手机上的库
+
+三条合起来（user 版 + `ro.debuggable=0` + 没有导出功能）意味着：**想直接看库里的数字，只有 `adb backup` 一条路。**
+
+```bash
+export MSYS_NO_PATHCONV=1            # 否则 /sdcard 会被改写成 C:/Program Files/Git/sdcard
+ADB="D:/Android/Sdk/platform-tools/adb.exe"
+"$ADB" backup -f D:/Documents/medbox/backup-probe.ab -noapk -nocompress com.medbox.family
+# ↑ 这条会阻塞，等手机上弹「完全备份」对话框
+```
+
+⚠️ 两个必须知道的点：
+
+1. **要在后台起这条命令，再点手机上的「备份我的数据」。** 前台跑的话没机会点那个按钮；
+   而如果先有一条**没人应答**的旧对话框留在屏幕上，新起的备份会复用它、按钮变灰 —— 这时先按返回键把旧框关掉再来。
+2. **备份会杀掉 App 进程**（之后重开是一次冷启动，会重跑结算闸门 —— 同一天是空操作，跨午夜就不是了）。
+
+解出来（`.ab` 的头是 24 字节纯文本 `ANDROID BACKUP\n5\n0\nnone\n`，后面直接跟一个 tar）：
+
+```bash
+tail -c +25 backup-probe.ab > payload.tar && tar -xf payload.tar
+# → apps/com.medbox.family/f/SQLite/medbox.db
+```
+
+🔴 **永远不要 `adb restore`。** 只往外拿，不往回灌。
+
+### 也可以用 adb 点手机（实测可用，但有脾气）
+
+`adb shell input tap X Y` / `input swipe` **在这台设备上是好的**（一度以为 MIUI 会静默拦掉，是错的）。
+所以装机验收可以自己点，不必全程求人。三个坑：
+
+1. **屏幕下半部分的点击会莫名其妙失效**（1080×2248 的屏，大约 `y > 1200`）。表现是**没有任何涟漪**、
+   前后截图 MD5 逐字节相同。**上面一半和底部 tab 条一直好用。**
+   → 解法：**先把目标滚到屏幕上半部分再点。**
+2. **坐标要换算。** 截图在编辑器里显示成 961×2000，原图是 1080×2248 —— **乘 1.124**。
+3. **截图是唯一的确认手段。** 点完 `screencap -p` + `pull`，比 MD5：
+   **MD5 没变就是没点上**，别猜。分不清「页面卡死」还是「点击被吞」时，
+   去点一个已知好用的控件（比如 tab 条）—— 它动了就说明是 y 区间的问题，不是界面坏了。
+
+另外：`input text` **只认 ASCII**，中文输入走不通（要搜药名就换别的路子）；
+`keyevent 4` = 返回；`am start -n com.medbox.family/.MainActivity` 把 App 拉回前台（**不是**冷启动）。
+
 ## 数据
 
 - 迁移源文件：**`D:\Downloads\all.json`**（33848 字节，`version: 1`，导出于 2026-09-16）
+- 同一份也推到了手机上：`/sdcard/all.json` 与 `/sdcard/Download/all.json`（33848 字节，2026-09-21 10:00），
+  **三处 MD5 完全一致 = `c4e150cb9c796b3581f615dff9441827`**（含 `test/fixtures/all.json`）——
+  所以「手机上导的是不是这份文件」是可以验的，别靠印象
 - 网页版数据：`../medbox-app/data/medbox.db`
 - 实测：37 个药品 / 3 个成员（外公·妈妈·孩子）/ 44 条在库批次（全部 `in_stock`）/ 6 条变动记录 / 合计 **2118** 单位
   - ⚠️ 曾经记的是 2124。差的 6 正好是 6 条 `auto_take` 各扣 1 —— 时间戳显示，**是「导出」这个动作本身触发了惰性结算**（事件 05:23:53Z，`exported_at` 13:23:58 = +8h），5 秒后写出的文件。**以文件为准（2118），网页版界面上的数会偏大。**
   - 另有 13 条在库批次**没有效期**（44 条里），界面显示灰药丸 —— 那是源文件就没填，不是导入丢了。
-- **6 个开着自动扣减的药**（全是外公的三高药，`auto_from='2026-09-15'`、`auto_accounted=1`）：缬沙坦胶囊、阿托伐他汀钙片、盐酸二甲双胍缓释片、阿司匹林肠溶片、苯磺酸氨氯地平片、格列美脲片
+- **6 个开着自动扣减的药**（全是外公的三高药）：缬沙坦胶囊、阿托伐他汀钙片、盐酸二甲双胍缓释片、阿司匹林肠溶片、苯磺酸氨氯地平片、格列美脲片
+  - **文件里**是 `auto_from='2026-09-15'`、`auto_accounted=1`；**导入后**必须被重设成导入当天、归零。
+    2026-09-21 装机导入后实测：6 个全是 `auto_from='2026-09-21'`、`auto_accounted=0` —— §6.1 那颗雷没炸。
+  - 2026-09-21 真机验收时把**缬沙坦胶囊**暂停了（`auto_paused=1`），用来验 M4。**这是手机上唯一一个和文件不一致的状态**，
+    下次导入会把它清掉（文件里 6 个药全是 `auto_paused=0`）—— 别再指望它还在。
 
 ## 测试
 
@@ -88,6 +149,21 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 
 **已落地 245 条**（`npx jest`，9 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
 —— 装机后对着它核，别凭印象。
+
+> 🔴 **golden 的基准日是 `EXPORT_DAY = '2026-09-16'`（`test/golden.test.ts:31`），App 用的是「今天」。**
+> 两者**只在导入当天重合**。过了午夜，6 个三高药每天各扣 1，数字就开始漂：
+>
+> | 日期 | 变化 | 打掉哪条 golden |
+> |---|---|---|
+> | 09-21（导入当天） | 全套精确成立 | — |
+> | 09-22 | 2118 → 2112；阿托伐他汀「约剩 6 天」→ 5 天 | 「约剩 6 天」 |
+> | **09-27** | 阿托伐他汀那盒扣空 → 转「已用完」→ 在库批次 44→43、外公 6→5 种 | 在库批次 / 按成员 |
+> | 10-01 | 格列美脲 25−10 = 15 ≤ 15 → 库存不足 1 种 → 2 种 | 库存不足 |
+> | 10-02 | 两盒 12-31 进 90 天窗口 | 快过期 1 → 3 |
+>
+> ⚠️ **09-27 那条不是线性的「每天少 6」，是一盒药被扣空、状态转「已用完」的结构性变化** ——
+> 那天看见「在库批次 43」不是 bug，别去查。
+> 只有**导入预览/结果页**那 5 个数不受时间影响（它们读文件，不读库）。
 
 `test/data.test.ts` 与 `test/helpers.ts` 是**额外的**：上游没有对应物，测的是**落库层在真 SQLite 上**
 的往返（外键、NOT NULL、事务、驱动差异）。建库方式见 `test/helpers.ts` 文件头。
@@ -115,20 +191,48 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 （`android/app/build/outputs/apk/release/app-release.apk`，61 MB，**2026-09-20 14:19**
 —— 含 §8.6 + §8.7 的全部改动；指纹与 `keys/medbox-release.keystore` 一致）。
 
-### 🟠 唯一还卡着的一件事：M1 清单第 9 项 —— 装机验收
+### 🟢 M1 清单第 9 项 —— 已装机、已导入、数量已核（2026-09-21）
 
-**手机已经连上了**（`adb devices` → `bfee7f5  device  product:dipper`，实机 Android 8.1 / arm64 与
-DESIGN.md §4 一致），APK 也已推送到手机的 `/sdcard/Download/`。现在卡在 **MIUI 自己的安装锁**：
+装机事实：
+
+| 项 | 值 |
+|---|---|
+| 包名 / 版本 | `com.medbox.family` v0.1.0 |
+| `firstInstallTime` | **2026-09-21 09:53:38**（`lastUpdateTime` 同） |
+| 装的是哪个包 | 手机 `/sdcard/Download/app-release.apk` = 61305866 字节 / 2026-09-20 14:19 = 上面那个本地构建产物 |
+| 导入 | 2026-09-21 10:04:50（`settings.last_import_at` = `1789956290628`），文件 `all.json` |
+
+**核过的数字**（对着 `test/golden.test.ts`，用 `adb backup` 把库拉下来直接查的，见上「怎么读手机上的库」）：
+
+| golden | 真机库实测 |
+|---|---|
+| 3 成员 / 37 档案 / 44 批次 / 6 变动 | ✅ |
+| 库存合计 2118 单位 | ✅ `SELECT SUM(qty) FROM batches WHERE status='in_stock'` = 2118 |
+| 44 条全在库，无 0 或负数 | ✅ |
+| 按成员 家庭共用 16 / 孩子 14 / 外公 6 / 妈妈 1（合计 37） | ✅ |
+| 需补货只有阿托伐他汀 · 约剩 6 天 | ✅（格列美脲 25 天，其余更长） |
+| 未填效期 13 | ✅ |
+| 单位无混用（不该出红字告警） | ✅ 0 组冲突 |
+| 6 个药 `auto_from` = 导入当天、`auto_accounted` = 0 | ✅ —— **§6.1 那颗雷确认没炸** |
+| **不变量 1**：`Batch.qty` == 该批次最后一条 `StockEvent.qty_after` | ✅ 6 条事件覆盖的那 6 盒全部一致，0 违例；另 38 盒没有事件（存量例外，§6.9） |
+| `PRAGMA journal_mode` = `delete` | ✅ **硬约束 4 落地** |
+| 备份里只有 `medbox.db`，没有 `-wal`/`-shm` | ✅ 「备份 = 一个文件」端到端成立 |
+
+**历史卡点（已绕过，留作教训）**：`adb install` 一度报
 
 ```
 INSTALL_FAILED_USER_RESTRICTED: Install canceled by user
 ```
 
-解法是开发者选项里的「USB 调试（安全设置）」+「通过 USB 安装」，而 **MIUI 要求 SIM 卡 + 小米账号 + 联网**
-才肯打开 —— 本机暂时办不到。详见 DESIGN.md §9 第 9 项（含验收要对的全部数字）。
+那是 **MIUI 自己的安装锁**，解法是开发者选项里的「USB 调试（安全设置）」+「通过 USB 安装」，
+而 MIUI 要求 SIM 卡 + 小米账号 + 联网才肯打开。最后是**用手机自带的文件管理器点 `/sdcard/Download/app-release.apk` 装上的** ——
+`adb install` 被锁不等于装不上，别在这条路上耗。详见 DESIGN.md §9 第 9 项。
 
-这是唯一能证明「电脑上过 ≠ 手机上过」这一步不成立的办法 ——
-而 DESIGN.md §8.4 记的那个驱动键名 bug 恰好说明了这两个环境**真的不一样**。
+**为什么这一步非做不可**：这是唯一能证明「电脑上过 ≠ 手机上过」这句话不成立的办法 ——
+而 DESIGN.md §8.4 记的那个驱动键名 bug 恰好说明这两个环境**真的不一样**。
+
+**还差的**：M4 真机验收的第 2 条要**过一夜**才有结论（暂停期间跨午夜不扣减），
+判据是设置页「变动记录」从 **6 变成 11**（不是 12）。见 DESIGN.md §8.7。
 
 （曾经的 260 字符路径卡点**已解决** —— 换掉 Android SDK 自带的旧 ninja 即可，
 完整步骤与「为什么网上说的挪短路径/云构建在我们这儿全都无效」见 DESIGN.md §8.3。
