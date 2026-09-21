@@ -1,0 +1,11 @@
+# 换行符：shell 脚本一律存成 LF。
+#
+# 本机 git 是 core.autocrlf=true，检出时会把文本文件的换行改成 CRLF。对 .sh 来说这会出事：
+# CRLF 的脚本在 WSL / Linux / macOS 的 bash 下会报 `$'\r': command not found`；直接
+# `./x.sh` 时第一行的 `#!/usr/bin/env bash\r` 更是找不到解释器。
+#
+# 本机的 Git Bash 自己容忍 CRLF，所以脚本在本地跑一直没问题 —— 这类坑只在别处复现，
+# 最难查。这条规则把它钉死在版本库里，跟谁在哪台机器上克隆无关。
+#
+# 只钉 .sh：.ts / .json / .md 的 CRLF 不影响各自的工具链，没必要一起动。
+*.sh text eol=lf
