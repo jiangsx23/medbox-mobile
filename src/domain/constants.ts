@@ -104,6 +104,30 @@ export const KEY_RESTOCK_DAYS = 'restock_days';
 export const DEFAULT_NEAR_EXPIRY_DAYS = 90;
 export const DEFAULT_RESTOCK_DAYS = 15;
 
+// ── 提醒（M5）────────────────────────────────────────────────────────
+// ⚠️ 这两个键**不进 `all.json`**（`buildExport` 的 settings 白名单里没有它们）。
+// 通知偏好是**本机偏好**，不是数据 —— 进了导出文件就变成「别人的偏好覆盖我的」。
+export const KEY_NOTIFY_ENABLED = 'notify_enabled'; // '1' | '0'
+export const KEY_NOTIFY_TIME = 'notify_time'; // 'HH:mm'
+
+/** 默认**开着**：这台 Android 8.1 不弹权限框，开了不会打断任何人（用户已拍板）。 */
+export const DEFAULT_NOTIFY_ENABLED = true;
+/** §7.5 锁定的默认提醒时刻。 */
+export const DEFAULT_NOTIFY_TIME = '09:00';
+
+/**
+ * 前瞻天数 —— 一次排多少天。
+ *
+ * 为什么是 14：① 只需大于「两次打开 App 的典型间隔」，而药箱是天天用的，
+ * 两周是很宽的垫；② 每排一条 = 一行偏好 + 一个原生闹钟，14 条远低于任何上限；
+ * ③ 关键是**跨线日是不动点**（见 `src/domain/notify.ts` 文件头），所以这个数
+ * 只影响「断更多久会漏」，**不影响准确度** —— 调大只是白排。
+ *
+ * **不做成用户设置**：设置页只留开关 + 时间。多一个旋钮就多一个「我调错了就收不到」
+ * 的失败方式，而它的收益是零。
+ */
+export const NOTIFY_HORIZON_DAYS = 14;
+
 /** 「家庭共用」不是一个成员记录，而是「归属为空」这个状态（§2.5）。 */
 export const SHARED_LABEL = '家庭共用';
 

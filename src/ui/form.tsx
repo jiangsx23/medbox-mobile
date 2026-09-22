@@ -33,6 +33,7 @@ import {
 } from 'react-native';
 
 import { today as dayOf, type CalendarDay } from '../domain/calendar';
+import { normalizeNotifyTime } from '../domain/settings';
 import {
   buttonGhost,
   buttonGhostLabel,
@@ -171,6 +172,85 @@ export function DateField({
           onChange={(e, picked) => {
             setIosOpen(false);
             if (e.type === 'set' && picked) onChange(dayOf(picked));
+          }}
+        />
+      ) : null}
+    </FieldShell>
+  );
+}
+
+// ── 时刻选择（M5 的「提醒时间」）─────────────────────────────────────
+
+/** 「几时几分」→ 一个 `Date`，只用来喂选择器；**基准日固定今天**，因为我们只要钟点。 */
+function timeToDate(hour: number, minute: number): Date {
+  const d = new Date();
+  d.setHours(hour, minute, 0, 0);
+  return d;
+}
+
+/**
+ * 时刻选择器。与 `DateField` 是同一套双路结构（安卓命令式 / iOS 组件），
+ * 区别只在 `mode: 'time'`。
+ *
+ * 🔴 三条都不能省：
+ * 1. **`is24Hour: true`** —— 不加的话 MIUI 会弹 12 小时制的转盘，
+ *    选个「上午 9 点」还得先想清楚是不是自己想要的，而且 `AM/PM` 在国内本来就少见。
+ * 2. **只读 `getHours()/getMinutes()`（本地分量）**，绝不走 `getUTCHours()` ——
+ *    在 UTC+8 那会让提醒整整早 8 小时，正是 §6.2 那颗雷的形状。
+ * 3. **基准日取今天**（而不是 `1970-01-01`）：选择器要把「钟点」放在某个具体日子上算，
+ *    拿一个 50 年前的日子容易在夏令时规则上出错；今天是哪个日子并不影响取出的钟点。
+ */
+export function TimeField({
+  label,
+  value,
+  onChange,
+  error,
+  hint,
+}: {
+  label: string;
+  value: { hour: number; minute: number };
+  onChange: (v: { hour: number; minute: number }) => void;
+  error?: string;
+  hint?: string;
+}) {
+  const [iosOpen, setIosOpen] = useState(false);
+
+  const take = (picked?: Date) => {
+    if (picked) onChange({ hour: picked.getHours(), minute: picked.getMinutes() });
+  };
+
+  const open = () => {
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        value: timeToDate(value.hour, value.minute),
+        mode: 'time',
+        is24Hour: true,
+        onChange: (e: DateTimePickerEvent, picked?: Date) => {
+          if (e.type === 'set') take(picked);
+        },
+      });
+    } else {
+      setIosOpen(true);
+    }
+  };
+
+  return (
+    <FieldShell label={label} error={error} hint={hint}>
+      {/* 复用日期那个「可点按钮 + 值」的样式：形状完全一样，没有第二个理由再造一套 */}
+      <View style={styles.dateRow}>
+        <Pressable style={[inputStyle(!!error), styles.dateBtn]} onPress={open}>
+          <Text style={styles.dateValue}>{normalizeNotifyTime(value.hour, value.minute)}</Text>
+        </Pressable>
+      </View>
+
+      {iosOpen ? (
+        <DateTimePicker
+          value={timeToDate(value.hour, value.minute)}
+          mode="time"
+          display="spinner"
+          onChange={(e, picked) => {
+            setIosOpen(false);
+            if (e.type === 'set') take(picked);
           }}
         />
       ) : null}

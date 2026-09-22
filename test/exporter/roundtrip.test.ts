@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { applyImport } from '../../src/importer/apply';
 import { parseExport } from '../../src/importer/parse';
 import { buildExport } from '../../src/exporter/build';
+import { getNotifyPrefs, setNotifyPrefs } from '../../src/data/notify';
 import { pauseMedicine, resumeMedicine } from '../../src/data/medicines';
 import { discard, edit, markExpired, restock, take, usedUp } from '../../src/data/stock';
 import type { MedboxDb } from '../../src/db/client';
@@ -602,5 +603,60 @@ describe('阶段 5 第 7 项的本地替身：八种界面操作之后，自检�
     const row = db.select().from(batches).all().find((b) => b.id === box.id);
     expect(row?.status).toBe(BATCH_IN_STOCK);
     expect(row?.qty).toBe(0);
+  });
+});
+
+describe('提醒偏好是本机偏好：导入不丢、导出不带（M5）', () => {
+  it('🔴 导入之后提醒偏好还在 —— `delete(settings)` 不能顺手带走它', () => {
+    // 不加这条守卫，失败的样子是这样的：用户开着提醒用了几个月，导入一次备份，
+    // 提醒就悄悄没了 —— 而且要等到「该推的那天没推」才会发现。
+    // 阈值不一样：那是文件里带来的合法值，本来就该被覆盖。
+    const db = importedDb(LATER_DAY);
+    setNotifyPrefs(db, { enabled: false, hour: 7, minute: 30 });
+
+    const parsed = parseExport(fixtureText, LATER_DAY);
+    if (!parsed.ok) throw new Error('fixture 解析失败');
+    applyImport(db, parsed.data, { importedAt: NOW, sourceName: 'all.json' });
+
+    expect(getNotifyPrefs(db)).toEqual({ enabled: false, hour: 7, minute: 30 });
+  });
+
+  it('从来没有设过提醒偏好时，导入不凭空造出这两个键', () => {
+    // 「保留」不是「补默认值」：往库里写一个用户没设过的值，
+    // 会让「这个键存在」不再等于「用户动过它」。
+    const db = importedDb(LATER_DAY);
+    const keys = db.select().from(settings).all().map((r) => r.key);
+    expect(keys).not.toContain('notify_enabled');
+    expect(keys).not.toContain('notify_time');
+  });
+
+  it('🔴 导出的文件里没有通知键 —— 它是本机偏好，不是数据', () => {
+    // 进了 all.json 就变成「别人的偏好覆盖我的」：换台手机导入一份备份，
+    // 自己的提醒时间被对方的覆盖掉，而且没有任何提示。
+    const db = importedDb();
+    setNotifyPrefs(db, { enabled: true, hour: 21, minute: 5 });
+
+    const built = buildExport(db, NOW);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const doc = JSON.parse(built.json) as { settings: Record<string, string> };
+    expect(Object.keys(doc.settings).sort()).toEqual(['near_expiry_days', 'restock_days']);
+    expect(JSON.stringify(doc.settings)).not.toContain('notify');
+    // 非空转断言：确认上面那句话不是在比一个空对象
+    expect(doc.settings.near_expiry_days).toBe('90');
+  });
+
+  it('保留的是值本身，不是「格式正确的值」—— 坏值原样留着，读的时候回默认', () => {
+    // 刻意不做「导入时顺手清洗」：清洗会把用户数据变成我们的猜测。
+    // 读出坏的值的兜底在 `getNotifyPrefs` 里（回 09:00，且绝不抛）。
+    const db = importedDb(LATER_DAY);
+    db.insert(settings).values({ key: 'notify_time', value: '乱写的' }).run();
+
+    const parsed = parseExport(fixtureText, LATER_DAY);
+    if (!parsed.ok) throw new Error('fixture 解析失败');
+    applyImport(db, parsed.data, { importedAt: NOW, sourceName: 'all.json' });
+
+    expect(db.select().from(settings).all().find((r) => r.key === 'notify_time')?.value).toBe('乱写的');
+    expect(getNotifyPrefs(db)).toEqual({ enabled: true, hour: 9, minute: 0 });
   });
 });

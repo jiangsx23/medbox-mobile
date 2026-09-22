@@ -14,10 +14,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { DB_NAME, isWalDisabled } from '../../src/db/client';
 import * as schema from '../../src/db/schema';
+import { getNotifyPrefs, setNotifyPrefs } from '../../src/data/notify';
 import { getThresholds } from '../../src/data/queries';
 import {
   getSetting,
@@ -30,13 +31,13 @@ import { toLocalDisplay } from '../../src/domain/instant';
 import { parseThresholds, type ThresholdErrors } from '../../src/domain/settings';
 import { Card, Field, SectionTitle } from '../../src/ui/components';
 import { useDb } from '../../src/ui/DbProvider';
-import { Button, TextField } from '../../src/ui/form';
+import { Button, TextField, TimeField } from '../../src/ui/form';
 import { useQuery } from '../../src/ui/useQuery';
 import { color, font, screen, space, text, tone } from '../../src/ui/theme';
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { db, hasData, journalMode, reload } = useDb();
+  const { db, hasData, journalMode, reload, notifyError } = useDb();
 
   const info = useQuery((db) => {
     const th = getThresholds(db);
@@ -44,6 +45,7 @@ export default function SettingsScreen() {
     const n = at === null ? null : Number.parseInt(at, 10);
     return {
       thresholds: th,
+      notify: getNotifyPrefs(db),
       importedAt: n !== null && Number.isFinite(n) ? n : null,
       importFile: getSetting(db, KEY_LAST_IMPORT_FILE),
       counts: {
@@ -78,6 +80,28 @@ export default function SettingsScreen() {
     // 不动库存，所以不需要结算；但必须刷新，否则 useQuery 拿的还是旧阈值
     reload();
     setSaved(true);
+  };
+
+  // 提醒时刻：同样是「用户动过之后才受控」，理由与阈值那两个一样
+  const [time, setTime] = useState<{ hour: number; minute: number } | null>(null);
+  const [timeSaved, setTimeSaved] = useState(false);
+  const timeValue = time ?? { hour: info.notify.hour, minute: info.notify.minute };
+
+  /**
+   * 开关**立即落库** —— 它不该等用户再去点一次「保存」。
+   * `reload()` 会走闸门，于是顺带把通知队列重排一遍：
+   * 开 ⇒ 立刻排上；关 ⇒ 未来条目被撤掉（今天那条除外，见 `reconcile` 铁律 1）。
+   */
+  const toggle = (enabled: boolean) => {
+    setNotifyPrefs(db, { enabled, hour: timeValue.hour, minute: timeValue.minute });
+    reload();
+  };
+
+  const saveTime = () => {
+    setNotifyPrefs(db, { enabled: info.notify.enabled, hour: timeValue.hour, minute: timeValue.minute });
+    setTime(null);
+    reload();
+    setTimeSaved(true);
   };
 
   const walOk = isWalDisabled(journalMode);
@@ -126,6 +150,57 @@ export default function SettingsScreen() {
           value={info.importedAt !== null ? toLocalDisplay(info.importedAt) : '从未导入'}
         />
         <Field label="文件" value={info.importFile ?? '—'} />
+      </Card>
+
+      <SectionTitle>提醒</SectionTitle>
+      <Card>
+        <View style={styles.autoRow}>
+          <View style={styles.autoLabel}>
+            <Text style={styles.autoTitle}>开启提醒</Text>
+            <Text style={styles.actionHint}>
+              药箱当天有事时推一条通知，不用自己记得打开这个 App。
+            </Text>
+          </View>
+          <Switch
+            value={info.notify.enabled}
+            onValueChange={toggle}
+            trackColor={{ true: color.brand, false: color.line }}
+            thumbColor={color.white}
+          />
+        </View>
+
+        {info.notify.enabled ? (
+          <>
+            <TimeField
+              label="提醒时间"
+              value={timeValue}
+              onChange={(v) => {
+                setTime(v);
+                setTimeSaved(false);
+              }}
+              hint="只推「今天到期 / 已过期 / 需补货 / 已用完」四类。同一件事只推一次，不会天天响。"
+            />
+            <Button label="保存时间" onPress={saveTime} />
+            {timeSaved ? <Text style={styles.saved}>已保存。</Text> : null}
+          </>
+        ) : (
+          <Text style={styles.tip}>
+            已关闭。未来排好的提醒会被撤掉（今天已经排上的那一条会留到点过为止）。
+          </Text>
+        )}
+
+        {notifyError !== null ? (
+          <Text style={styles.badNote}>⚠️ 上次排提醒失败：{notifyError}</Text>
+        ) : null}
+
+        <Pressable style={[styles.action, styles.actionDivided]} onPress={() => router.push('/notify-check')}>
+          <Ionicons name="notifications-outline" size={18} color={color.brand} />
+          <Text style={styles.actionLabel}>通知自检</Text>
+          <Ionicons name="chevron-forward" size={16} color={color.muted} />
+        </Pressable>
+        <Text style={styles.actionHint}>
+          通知没来时按这里的四步做一遍。手机系统会限制后台提醒，这一步绕不过去。
+        </Text>
       </Card>
 
       <SectionTitle>阈值</SectionTitle>
@@ -194,6 +269,11 @@ const styles = StyleSheet.create({
   // 同一张卡里第二行往上加一条细线（与首页/详情页的分隔线同一套做法）
   actionDivided: { borderTopWidth: 1, borderTopColor: color.lineSoft, marginTop: space.sm },
   actionLabel: { flex: 1, fontSize: font.base, fontWeight: '700', color: color.ink },
+  // 开关那一行：左边一坨说明文字、右边一个 Switch（与药品表单里的「自动扣减」同一套）
+  autoRow: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  autoLabel: { flex: 1 },
+  // 不复用 actionLabel：那个带 `flex: 1`，在竖排容器里会把文字拉长
+  autoTitle: { fontSize: font.base, fontWeight: '700', color: color.ink },
   actionHint: { fontSize: font.tiny, color: color.muted, lineHeight: 17, marginTop: space.xs },
   tip: { fontSize: font.tiny, color: color.muted, marginTop: space.sm, lineHeight: 17 },
   saved: { fontSize: font.small, color: tone.ok.text, marginTop: space.sm },

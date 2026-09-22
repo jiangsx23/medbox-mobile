@@ -22,9 +22,15 @@ import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-nativ
 
 import { openMedboxDatabase, isWalDisabled, type MedboxDb } from '../db/client';
 import { settleAll } from '../data/stock';
+import { getNotifyPrefs } from '../data/notify';
+import { getThresholds } from '../data/queries';
 import type { CalendarDay } from '../db/schema';
 import { today as todayDay } from '../domain/calendar';
+import { NOTIFY_HORIZON_DAYS } from '../domain/constants';
+import { planNotifications } from '../domain/notify';
 import { hasAnyData } from '../importer/apply';
+import { loadNotifySnapshot } from '../notify/snapshot';
+import { prepare, syncNotifications } from '../notify/scheduler';
 import { color, font, screen, space, text } from './theme';
 
 type DbContextValue = {
@@ -40,8 +46,18 @@ type DbContextValue = {
   hasData: boolean;
   /** 关 WAL 的核对结果。不是 'delete' 就该在设置页告警 */
   journalMode: string;
-  /** 手动重跑闸门（导入完成后、下拉刷新时调用） */
-  reload: () => void;
+  /**
+   * 手动重跑闸门（导入完成后、下拉刷新时调用）。
+   * `forceNotify` 会把推送队列**无条件重发**一遍，见 `run` 里 `refreshAll` 的理由。
+   */
+  reload: (opts?: { forceNotify?: boolean }) => void;
+  /**
+   * 上一次推送重排的失败原因，成功时为 null（M5）。
+   *
+   * 🔴 推送失败**绝不拦路** —— 它只被记在这里，让「通知自检」页能说出来。
+   * 通知坏了不该让 App 打不开：药箱的主体功能一个都不依赖它。
+   */
+  notifyError: string | null;
 };
 
 const DbContext = createContext<DbContextValue | null>(null);
@@ -70,26 +86,72 @@ export function DbProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const [day, setDay] = useState<CalendarDay>(() => todayDay());
+  const [notifyError, setNotifyError] = useState<string | null>(null);
   const busy = useRef(false);
 
-  const run = useCallback(async () => {
+  const run = useCallback(async (opts: { forceNotify?: boolean } = {}) => {
     if (busy.current) return; // 冷启动与回前台可能几乎同时触发，串行化
     busy.current = true;
     try {
       let handle = ready;
+      // 还在等库打开 ⇒ 这是**本进程第一次**跑闸门。重启手机必然伴随一次冷启动，
+      // 而重启会清空 AlarmManager 却留下 expo 的队列记录 —— 所以第一次必须重发，
+      // 否则那批「看起来还在」的提醒再也不会响。见 `src/domain/notify.ts` 的 reconcile。
+      const coldStart = !handle;
       if (!handle) {
         const opened = await openMedboxDatabase();
         handle = { db: opened.db, journalMode: opened.journalMode };
         setReady(handle);
       }
+      // 「今天」只取一次，结算与推送共用 —— 否则跨午夜那一瞬间两者可能差一天。
+      const now = Date.now();
+      const today = todayDay(new Date(now));
+
       // 结算。幂等，所以冷启动与回前台各跑一次是设计目标而不是浪费。
       // 必须在 `setVersion` **之前**跑完：版本号一涨，所有界面就会重新取数，
       // 那时候库存数字必须已经是结算后的。
-      settleAll(handle.db, todayDay());
+      settleAll(handle.db, today);
 
       // 回前台时可能已经跨了午夜，日期要跟着走，否则「今天到期」会算错一天
-      setDay(todayDay());
+      setDay(today);
       setVersion((v) => v + 1);
+
+      // ── 推送重排（M5）────────────────────────────────────────────
+      // 🔴 必须在**结算之后**：前瞻吃的是结算后的库存。
+      //    注意这与硬约束 6 方向**正好相反** —— 导出那条路径的纪律是
+      //    「绝不结算、只 select」；推送是「必须结算完再算」。两者都别搞混。
+      //
+      // 放在 `setVersion` 之后是**刻意的偏离**：`prepare()` 在新安卓上会弹
+      // 权限框，await 它会让「正在打开药箱…」一直挂到用户点完为止。
+      // 而在 `await` 处 React 已经把上面两个 setState 刷出去了 ⇒ 界面照常出，
+      // 通知自己在后面排队。`busy` 仍然握着，所以不会和下一次重排打架。
+      try {
+        const prefs = getNotifyPrefs(handle.db);
+        // 关掉开关 = 愿望为空 = 未来所有条目被撤掉（今天那条除外，见 reconcile）
+        const desired = prefs.enabled
+          ? planNotifications(
+              loadNotifySnapshot(handle.db, today, getThresholds(handle.db)),
+              today,
+              {
+                hour: prefs.hour,
+                minute: prefs.minute,
+                restockDays: getThresholds(handle.db).restockDays,
+                horizonDays: NOTIFY_HORIZON_DAYS,
+                now,
+              },
+            )
+          : [];
+        if (prefs.enabled) await prepare();
+        // 🔴 冷启动无条件重发；自检页的「重新对齐一次」也走这条强制路（它存在的意义
+        //    就是修好队列，而它自己以前也修不好 —— 见 reconcile 的长注释）
+        await syncNotifications(desired, today, {
+          refreshAll: coldStart || opts.forceNotify === true,
+        });
+        setNotifyError(null);
+      } catch (e) {
+        // 🔴 只记不抛。通知坏了不该让 App 打不开 —— 药箱的主体功能不依赖它。
+        setNotifyError(e instanceof Error ? e.message : String(e));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -140,7 +202,8 @@ export function DbProvider({ children }: { children: ReactNode }) {
         version,
         hasData,
         journalMode: ready.journalMode,
-        reload: () => void run(),
+        reload: (opts) => void run(opts),
+        notifyError,
       }}
     >
       {children}

@@ -30,8 +30,22 @@
 ## 技术栈
 
 Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
-分享用 `expo-sharing`（**只加这一个**，M6）。在库清单是**纯文本 `.txt`**，走**同一条**分享面板 ——
-**不引第二个依赖**：不做 PDF、不装 `expo-print`、不做 xlsx。
+
+原生依赖**一共两个**，都是被需求逼出来的，不是顺手加的：
+
+| 依赖 | 里程碑 | 为什么躲不过 |
+|---|---|---|
+| `expo-sharing` | M6 | 唯一能拉起系统分享面板的东西。没有纯 JS 替代。 |
+| `expo-notifications` | M5 | 唯一能让**用户不打开 App 也收到提醒**的东西。见下。 |
+
+🔴 **推送为什么不能用纯 JS 定期器凑一个**：JS 只在 App 进程活着时才跑，
+而推送的全部意义是「在用户想不到要打开它的时候说话」。`expo-notifications` 走的是原生
+`AlarmManager` —— 到点由系统 service 自己展示，**不需要 JS 活着、不需要进程活着**。
+这是这个功能的定义，不是实现细节。**代价要认**：它是本项目唯一一个需要整跑
+prebuild → 签名 → gradle → 验签 → 装机的功能。
+
+**但「加了第二个」不等于「可以加第三个」**：在库清单仍然是**纯文本 `.txt`**，走**同一条**
+分享面板 —— 不做 PDF、不装 `expo-print`、不做 xlsx。
 
 选 Expo 的决定性理由：iOS 那一步**只有 Expo 能从 Windows 出包**（EAS Build 云构建）。Flutter 到时候必须买 Mac。
 
@@ -50,6 +64,23 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
   ② 四张表全按 **`id` 升序**，`stock_events` 尤其必须（不变量 1 的平局判定是 `>=`，同 `createdAt` 时靠后的赢）；
   ③ `settings` **只写两个阈值键**，绝不 spread。**外加一条自检**：生成完立刻 `parseExport` 解析自己一遍，不过就**不出文件** ——
   硬约束 5 从「测试里钉住」升级成**运行时自证**。详见 DESIGN.md §7.6。
+- 🔴 **推送队列必须排在结算闸门之后** —— `src/ui/DbProvider.tsx` 里 `settleAll` 必须早于
+  `syncNotifications`（守卫测试钉住）。前瞻吃的是**结算后**的库存，顺序反了会安静地按昨天的数字排。
+  ⚠️ **这与硬约束 6 方向正好相反**：`src/exporter/` 的纪律是「绝不结算、只 select」。
+  两条都别搞混 —— 两条各有一份守卫测试。
+- 🔴 **通知正文里永远不许出现药名**（`title` 只有「药箱：N 件事待处理」，`body` 只有数字）。
+  Android 没有 iOS 那种「锁屏隐藏正文」开关，所以保证只能做在**正文**上。
+  真正的护栏是**类型**：`formatSummary(counts)` 的入参只有四个数字，**结构上就拿不到药名**。
+  ⚠️ 顺带：频道上的 `lockscreenVisibility: PRIVATE` **在本机实测没生效**（读到 `-1000` = 没设过），
+  **别把它当保障**；锁屏这一层的唯一保障就是上面这条。
+- 🔴 **`reconcile` 的「队列现状」在安卓上不是真相** ——
+  `getAllScheduledNotificationsAsync()` 读的是 **expo 自己的 SharedPreferences**（我们请求过什么），
+  **不是 `AlarmManager`**（闹钟还在不在）。重启会清空后者、留下前者 ⇒ 若不强制重发，
+  就会「计划没变」⇒ 零写入 ⇒ **提醒静默失效，而自检页显示一切正常**。
+  **所以冷启动必须传 `refreshAll: true`**（`src/ui/DbProvider.tsx` 的 `coldStart = !handle`），
+  自检页的「重新对齐一次」也必须走强制路（`reload({ forceNotify: true })`）。两条都有守卫测试。
+  ⚠️ **但不要改成「每次回前台都重发」** —— 那会丢掉「计划没变就零写入」这条设计目标。
+  **判队列死活要用 `dumpsys alarm`，不能用自检页**（自检页读的就是那份会说谎的记录）。见 DESIGN.md §7.7。
 - 🔴 **`delta_qty` 允许为 0 的类型只有三种：`edit` / `mark_expired` / `restock`**（`parse.ts` 的 `ZERO_DELTA_TYPES`）。
   `requirements.md` §2.3 的原文只写了「仅『编辑』可以是 0」—— **照它写会坏掉硬约束 5 的两个方向**：
   网页版自己就给「标记过期」「恢复在库」记 0（`medbox-app/app/routes/batches.py:307,322`），
@@ -67,9 +98,19 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 | ABI | universal APK（`armeabi-v7a` + `arm64-v8a`），32/64 位都能装 |
 | `allowBackup` | `true`（Expo 模板显式写在 `android/app/src/main/AndroidManifest.xml:14`）。**实机验证可用** —— 这是本机唯一能读到 `/data/data` 里那个库的办法，见下「怎么读手机上的库」 |
 
-出包命令顺序、本机工具链路径、`prebuild` 会删掉 `android/` 的坑：见 `DESIGN.md` §8.2。
+🔴 **图标、权限、原生插件一律走 `app.json`，绝不手改 `android/` 里任何文件。**
+`android/` 是 gitignore 的、`expo prebuild` 会**整个删掉重建** —— 手改的东西下次出包就没了，
+而且**不会报错**，只会安静地退回默认（M5 的 `SCHEDULE_EXACT_ALARM` 与通知图标就是这么加的）。
+`prebuild` 只该从 `app.json` 的 `android.permissions` 与 `plugins` 数组里读配置。
 
 🔴 **签名密钥在 `keys/medbox-release.keystore`，别删。** 它不进 `android/`（`expo prebuild` 会把 `android/` 整个删掉重建），所以每次 prebuild 之后必须跑 `bash scripts/android-signing.sh` 把签名配置补回去。**换密钥 = 已装的 App 无法覆盖升级 = 必须卸载 = 本地数据库全丢。**
+
+> ⚠️ `scripts/android-signing.sh` 顺带写 `android/local.properties`（同样的理由：prebuild 会把它删掉）。
+> **2026-09-22 修过一次真 bug**：`ANDROID_HOME` 没设时它 fallback 到 MSYS 的 `/d/Android/Sdk`，
+> 原样写进 `local.properties` ⇒ gradle 报 `SDK location not found`。Java 只认 `D:/Android/Sdk`。
+> 现在脚本会把 `/d/…` 转成 `D:/…`。**「退出码 0」也可能是 `BUILD FAILED`** —— 见 DESIGN.md §8.2。
+
+出包命令顺序、本机工具链路径、`prebuild` 会删掉 `android/` 的坑：见 `DESIGN.md` §8.2。
 
 ## 目标设备
 
@@ -79,6 +120,13 @@ Expo (React Native) + TypeScript + `expo-sqlite` + **Drizzle ORM**
 - Android 8.1 **支持**（Expo SDK 54–57 要求 Android 7+，RN `minSdk` 24）。
 - 8.1 反而更省事：**不需要** `POST_NOTIFICATIONS` 运行时权限、**不需要** `SCHEDULE_EXACT_ALARM`。
 - 🔴 **MIUI 会杀定时通知。** 装好后要走四步白名单（省电无限制 / 自启动 / 锁后台 / 通知设优先），App 里要做「通知自检」引导页。详细步骤见 DESIGN.md §6.6。
+- 🔴 **2026-09-22 实测订正：MIUI 压根不投递 `BOOT_COMPLETED`。**
+  日志里 `BroadcastQueueInjector`（**MIUI 私有 tag**，AOSP 没有）拦掉了它，同一个开机循环里
+  Alipay、搜狗都被拦，**而我们的包一次都没出现** —— 不是「被拒绝」，是**从来没被投递**。
+  ⇒ `expo-notifications` 自带的 boot receiver（`.service.NotificationsService`）**永远没机会执行**，
+  尽管它在 manifest 里、`RECEIVE_BOOT_COMPLETED` 也是 granted、应用状态也是 `stopped=false`。
+  ⇒ **重启后队列必然是空的**，而**白名单第 ② 步（自启动）对这件事实测无效**（开了、UI 上确认生效了，重启后照样 0 条）。
+  **别再承诺「走完四步重启就没事了」。** 详细证据（含两次把自己骗过去的错误结论）见 DESIGN.md §6.6 / §8.9。
 - ⚠️ **Android 13+ 的通知权限流程、12+ 的精确闹钟权限，在这台设备上永远测不到** —— 给新手机用户前必须真机实测。
 
 2026-09-21 实机读出来的、写文档时值得先知道的一批属性：
@@ -128,6 +176,12 @@ tail -c +25 backup-probe.ab > payload.tar && tar -xf payload.tar
 # → apps/com.medbox.family/f/SQLite/medbox.db
 ```
 
+> ✅ **M5 之后包里还多了推送队列的记录**（2026-09-22 实测）：
+> `apps/com.medbox.family/sp/expo.modules.notifications.SharedPreferencesNotificationsStore.xml`
+> —— 那就是「我们请求过哪些提醒」。**它是诊断「闹钟为什么没响」时唯一能看到原始记录的办法**：
+> 它和 `dumpsys alarm` 的差集就是「记录还在、闹钟没了」这个状态本身。
+> ⚠️ **但别拿它当「闹钟还在」的证据**（那正是 M5 踩的坑，见上「看推送队列」）。
+
 > ⚠️ **`adb backup` 拿不到 App 的缓存目录。** 包里只有 `f/SQLite/medbox.db` 这类
 > `f/`（files）下的东西，`Paths.cache`（导出功能写 `all.json` 的地方）**不在里面**。
 > 后果：**「把导出的 `all.json` 拉回电脑」这件事，`adb backup` 帮不上忙** ——
@@ -175,9 +229,34 @@ tail -c +25 backup-probe.ab > payload.tar && tar -xf payload.tar
 4. **截图比 MD5 仍是「有没有反应」的最终裁判**（第 1 条解决的是「有没有点对」，这条解决「有没有点上」）：
    `screencap -p` + `pull`，**MD5 没变就是真的没点上**，别猜。
 
+5. 🔴 **`screencap` 不要往 `/sdcard/` 写**（M5 验收实测：那台机器上会失败）——
+   改用 **`/data/local/tmp/`**，`adb pull` 一样拉得回来：
+   ```bash
+   "$ADB" shell screencap -p /data/local/tmp/s.png && "$ADB" pull /data/local/tmp/s.png D:/Documents/medbox/_tmp/s.png
+   ```
+
+6. **唤醒屏幕用 `keyevent 224`（`KEYCODE_WAKEUP`）**。
+   ⚠️ **`keyevent 26` 是 `KEYCODE_POWER`，它会「切换」而不是「点亮」** ——
+   屏幕本来亮着的话，按 26 反而把它关掉。测「锁屏下通知来不来」时用错这个会得出完全错的结论。
+
 另外：`input text` **只认 ASCII**，中文输入走不通 —— 而且**药品列表的搜索框不吃拼音**
 （`input text mengtuo` 搜不到蒙脱石散），要定位某味药就**滚动列表**或者换个入口；
 `keyevent 4` = 返回；`am start -n com.medbox.family/.MainActivity` 把 App 拉回前台（**不是**冷启动）。
+`keyevent 111` = ESC 收键盘（见第 2 条）。
+
+### 看推送队列：只能用 `dumpsys alarm`
+
+```bash
+"$ADB" shell dumpsys alarm > D:/Documents/medbox/_tmp/alarm.txt   # ⚠️ 先落文件再搜，别直接 grep 管道
+grep -n "com.medbox.family" D:/Documents/medbox/_tmp/alarm.txt     # ⚠️ 行首有空格，模式别带前导空格
+```
+
+🔴 **判「闹钟还在不在」只有这一条路。** App 里的「通知自检」页读的是 expo 的
+SharedPreferences（「我们请求过什么」），**重启后它照样报「3 条 / 正常」而 AlarmManager 里是 0 条**。
+拿自检页当判据会得出完全相反的结论 —— M5 验收就是这么被骗过一次的（DESIGN.md §7.7）。
+
+`adb shell dumpsys notification --noredact` 能直接读到通知的**标题/正文/频道/可见性**
+（验「正文里没有药名」和「图标与品牌色对不对」都用它），不用截图。
 
 ## 数据
 
@@ -209,8 +288,17 @@ tail -c +25 backup-probe.ab > payload.tar && tar -xf payload.tar
 | `tests/test_autodose.py` | 409 | 34 | 规则照搬、测试代码重写 | ✅ `test/autodose.test.ts` |
 | `tests/test_migrate.py` | 180 | 9 | ❌ 网页版专用，作废 | — |
 
-**已落地 322 条**（`npx jest`，12 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
+**已落地 390 条**（`npx jest`，15 个套件）。其中 **`test/golden.test.ts` 钉住 M1 的验收数字**
 —— 装机后对着它核，别凭印象。
+
+> `test/notify-guard.test.ts`（M5）是**结构性守卫**那一类：它读源码、去注释、跑正则，
+> 断言的是**架构本身**（谁 import 了 expo、闸门顺序、冷启动有没有传 `refreshAll`）。
+> 这些约束用行为测试表达不出来，而且全都是「改坏了当场没症状、几个月后在真机上才发现」的形状 ——
+> **它已经真抓到过一个**（重启后队列静默失效，见「当前进度」的 M5 那条）。
+> 写这类守卫有两条硬要求，照 `test/exporter/roundtrip.test.ts` 的先例：
+> ① 断言打在**去掉注释**的源码上（本项目注释密度高，第一版守卫被文件头那句
+> 「**绝不** `cancelAllScheduledNotificationsAsync()`」自己绊倒了）；
+> ② 每条都要有**非空转断言**（M6 踩过「守卫永远为真」—— 正则写错、路径写错、目录扫空，测试照样绿）。
 
 > `test/exporter/` 那三个套件（M6）值得单独说一句：`roundtrip.test.ts` 是全项目**唯一**能自动证明
 > 「`version: 1` 双向兼容」的东西 —— 前面所有测试都只覆盖「导入端能读网页版的文件」，
@@ -263,11 +351,34 @@ tail -c +25 backup-probe.ab > payload.tar && tar -xf payload.tar
   而导入端只允许「编辑」为 0 ⇒ **点一下「标记过期」，导出就被自己的自检永久拒掉**（账本只增，那条事件删不掉）。
   修法是把这两个类型加进白名单，见上「关键实现规则」。见 DESIGN.md §7.6 / §8.8
 
-`tsc` 干净、**322 条测试全过**。**含 M6 的新 APK 已出、已验签、已装到手机**
-（`android/app/build/outputs/apk/release/app-release.apk`，**61347726 字节，2026-09-22 10:25**；
+- **M5 完成**（2026-09-22 编码 + 真机验收，**尚未提交**）：本地通知推送 + 「通知自检」页。
+  装好之后药箱哪天有事、那天早 9:00 推一条「药箱：N 件事待处理」，**用户不用打开 App**。
+  新增 `expo-notifications`（第二个原生依赖，为什么躲不过见上「技术栈」）。
+  **测试 322 → 390，套件 12 → 15**。
+  **这一轮最重要的产出不是功能，是真机验收扫出来的一个静默失效 bug**：
+  🔴 `getAllScheduledNotificationsAsync()` 在安卓上读的是 **expo 自己的 SharedPreferences**
+  （「我们请求过什么」），**不是 `AlarmManager`**（「闹钟还在不在」）。重启清空后者、留下前者
+  ⇒ `reconcile` 认为「计划没变」⇒ **零写入** ⇒ 提醒再也不会响，而自检页照样报
+  「待发 3 条 / 上次重排 **正常**」，**它自带的那颗「重新对齐一次」按钮也修不好**。
+  **修法**：`reconcile` 加 `refreshAll`，**冷启动无条件重发**（`const coldStart = !handle`）
+  + 自检页按钮强制重发。实测 4 个重启循环：修之前「打开 App」和「点按钮」都留下 0 条，
+  修之后冷启动 **0 → 3 条**，`am force-stop` 造成的清空同样能修回来。
+  见 DESIGN.md §7.7 / §8.9
+  ⚠️ **但它修不掉「重启到下次打开 App 之间」那一段** —— 重发需要 JS 进程先跑起来，
+  而 **MIUI 的 `BroadcastQueueInjector` 压根不投递 `BOOT_COMPLETED`**（拦别人的日志铁证见 DESIGN.md §6.6）。
+  🔴 **MIUI 的「自启动」白名单对这件事实测无效**（开了、确认生效了，重启后队列照样是 0）。
+  **不要在自检页或任何地方承诺白名单能修好重启。**
+  验收 13 项：**第 9 项失败**（重启后队列丢失）、**第 11 项是否定结论**（白名单无效），
+  第 3/5/12/13 项各有保留或未做（见 DESIGN.md §8.9 与 §9 第 17 项）。
+
+`tsc` 干净、**390 条测试全过**。**含 M5 的新 APK 已出、已验签、已装到手机**
+（`android/app/build/outputs/apk/release/app-release.apk`，**62682503 字节，2026-09-22 13:53**；
 `CN=medbox`，SHA-256 `4CCFB479…F6D0`，与 `keys/medbox-release.keystore` **逐位一致**）。
 ✅ **是 `adb install -r` 覆盖装上去的**（`firstInstallTime` 仍是 2026-09-21 09:53:38 ⇒ 库完好、数据没丢）——
 见 DESIGN.md §9 第 9 项：MIUI 拦的是**全新安装**，覆盖安装不受影响。
+
+> ⚠️ **`apksigner.bat` 的路径别照抄**：`build-tools/35.0.1` 在这台机器上**不存在，而且它不报错**。
+> 先用 `ls D:/Android/Sdk/build-tools/` 看有哪些版本（这台有 `35.0.0` 和 `36.0.0`）。
 
 ### 🟢 M1 清单第 9 项 —— 已装机、已导入、数量已核（2026-09-21）
 

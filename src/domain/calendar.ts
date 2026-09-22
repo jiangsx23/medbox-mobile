@@ -125,5 +125,22 @@ export function isValidDay(s: unknown): s is CalendarDay {
   return typeof s === 'string' && parseDay(s) !== null;
 }
 
+/**
+ * 「某天的本地墙上时间」→ epoch 毫秒。与 `today()` 互为逆运算。
+ *
+ * 推送（M5）用它算「9 月 23 日早 9:00」那个闹钟时刻。用户要的是**墙上时间**，
+ * 不是「距纪元多少毫秒」——所以必须走本地分量拼 `Date`，不能 `Date.UTC`
+ * （后者在 UTC+8 会让闹钟早响 8 小时，正是 §6.2 那颗雷的形状）。
+ *
+ * ⚠️ 夏令时：若那天那个钟点本地不存在（春季前跳），`Date` 会把它推到跳变之后。
+ * 中国没有夏令时，且我们排的是 9:00 这种整点，实际碰不到；但这是「本地时间」的
+ * 固有代价，不是实现疏漏。
+ */
+export function localDayAt(day: CalendarDay, hour: number, minute: number): number {
+  const m = DAY_RE.exec(day);
+  if (!m) throw new Error(`不是合法的日历日：${day}`);
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), hour, minute, 0, 0).getTime();
+}
+
 // ── 时刻（epoch 毫秒）────────────────────────────────────────────────
 export { DAY_MS };

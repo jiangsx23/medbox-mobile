@@ -50,3 +50,33 @@ export function parseThresholds(nearRaw: string, restockRaw: string): ThresholdR
   if (nearDays === null || restockDays === null) return { ok: false, errors };
   return { ok: true, nearDays, restockDays };
 }
+
+// ── 提醒时间（M5）─────────────────────────────────────────────────────
+
+export type NotifyTimeResult = { ok: true; hour: number; minute: number } | { ok: false; error: string };
+
+/**
+ * 解析 `'HH:mm'`。
+ *
+ * 三种失败分开报，理由同上面的阈值：对着 `'9:65'` 说「时间需为 HH:MM 格式」
+ * 会让人一头雾水（它的形状没问题）。
+ *
+ * **读宽松、写严格**：小时允许少写前导零（`'9:05'` 收），但写回库时一律走
+ * `normalizeNotifyTime` 补成 `'09:05'`。因为时刻会拼进通知的标识符，而标识符是
+ * **比较**用的 —— 同一个时刻有两种写法，重排就会把同一条通知认成两条。
+ */
+export function parseNotifyTime(raw: string): NotifyTimeResult {
+  const s = (raw ?? '').trim();
+  if (!/^\d{1,2}:\d{2}$/.test(s)) return { ok: false, error: '提醒时间需为 HH:MM 格式' };
+  const col = s.indexOf(':');
+  const hour = Number(s.slice(0, col));
+  const minute = Number(s.slice(col + 1));
+  if (hour > 23) return { ok: false, error: '小时需在 0-23 之间' };
+  if (minute > 59) return { ok: false, error: '分钟需在 0-59 之间' };
+  return { ok: true, hour, minute };
+}
+
+/** `(9, 5)` → `'09:05'`。写库前一律过一遍，保证库里只有一种写法。 */
+export function normalizeNotifyTime(hour: number, minute: number): string {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}

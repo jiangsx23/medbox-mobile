@@ -121,7 +121,18 @@ if [ -z "$SDK" ]; then
   exit 1
 fi
 
-# Java 的 properties 里反斜杠是转义符，一律写成正斜杠（gradle 两种都认）
+# 🔴 MSYS 的挂载路径（`/d/Android/Sdk`）Java **不认识** —— 它会被当成
+# 「当前盘符下的 \d\Android\Sdk」，也就是 D:\d\Android\Sdk，不存在。
+# 这台机器上 ANDROID_HOME 通常是空的，于是上面那个 fallback 拿到的正是 `/d/…` 形式，
+# 原样写进 local.properties ⇒ gradle 报的就是这个脚本本该防住的那条
+# 「SDK location not found」。**2026-09-22 实测踩到**（上一版只把反斜杠换成斜杠，
+# 没处理盘符那一段，所以注释里那句「gradle 两种都认」是错的）。
+# 与 `D:\Android\Sdk` 两种写法 gradle 都认，但**只认 Windows 形式**。
+case "$SDK" in
+  /[A-Za-z]/*) SDK="$(printf '%s' "$SDK" | sed 's|^/\([A-Za-z]\)/|\1:/|' | sed 's|^\([a-z]\)|\U\1|')" ;;
+esac
+
+# Java 的 properties 里反斜杠是转义符，一律写成正斜杠
 SDK_WIN="$(printf '%s' "$SDK" | sed 's|\\|/|g')"
 if [ -f "$LP" ] && grep -qxF "sdk.dir=$SDK_WIN" "$LP"; then
   echo "local.properties 已正确，跳过"

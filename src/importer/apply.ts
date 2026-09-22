@@ -17,7 +17,12 @@ import type { MedboxDb } from '../db/client';
 import type { Instant } from '../db/schema';
 import { batches, members, medicines, settings, stockEvents } from '../db/schema';
 import { insertedId } from '../data/stock';
-import { KEY_NEAR_EXPIRY_DAYS, KEY_RESTOCK_DAYS } from '../domain/constants';
+import {
+  KEY_NEAR_EXPIRY_DAYS,
+  KEY_NOTIFY_ENABLED,
+  KEY_NOTIFY_TIME,
+  KEY_RESTOCK_DAYS,
+} from '../domain/constants';
 import type { ParsedImport } from './parse';
 
 /** 导入完成后回给界面看的账。数字要与网页版对得上。 */
@@ -49,6 +54,16 @@ export type ApplyOptions = {
  * 这会丢掉手机上的现有数据（虽然同一份文件的重复导入不会产生重复数据）。
  */
 export function applyImport(db: MedboxDb, data: ParsedImport, opts: ApplyOptions): ImportOutcome {
+  // 提醒偏好是**本机偏好**，导出文件里根本没有对应的字段 —— 而下面那句
+  // `delete(settings)` 会把整张表清空。不先抢救出来的话，用户开着提醒、
+  // 几个月后导入一次备份，提醒就悄悄没了，且要等到「该推的那天没推」才发现。
+  // 阈值不一样：那是**文件里带来的合法值**，本来就该被覆盖。
+  const keepNotify: Array<{ key: string; value: string }> = [];
+  for (const key of [KEY_NOTIFY_ENABLED, KEY_NOTIFY_TIME]) {
+    const row = db.select().from(settings).where(eq(settings.key, key)).get();
+    if (row) keepNotify.push({ key: row.key, value: row.value });
+  }
+
   db.transaction((tx) => {
     // ── 清空。顺序按外键依赖倒着来：先删子表 ────────────────────────
     tx.delete(stockEvents).run();
@@ -146,6 +161,9 @@ export function applyImport(db: MedboxDb, data: ParsedImport, opts: ApplyOptions
         .values({ key: KEY_LAST_IMPORT_FILE, value: opts.sourceName })
         .run();
     }
+
+    // ── 把上面抢救出来的提醒偏好放回去（事务内，与清空同生共死）──────
+    for (const s of keepNotify) tx.insert(settings).values(s).run();
   });
 
   return {
