@@ -37,7 +37,23 @@ const DRIZZLE_DIR = join(__dirname, '..', 'drizzle');
  * 迁移文件没重新生成，测试会立刻挂 —— 相当于顺手校验了两者一致。
  */
 export function freshDb(): MedboxDb {
-  const sqlite = new Database(':memory:');
+  return freshDbWithHandle().db;
+}
+
+/**
+ * 同 `freshDb`，但把 better-sqlite3 的原始 handle 一并交出来。
+ *
+ * 只有需要绕过 drizzle、直接问 SQLite 本身的时候才用它 ——
+ * 目前唯一的用处是导出端的守卫测试要读 `PRAGMA journal_mode`
+ * （`test/exporter/roundtrip.test.ts`）。
+ *
+ * `file` 给出时建的是**磁盘库**而不是内存库。这一项是必需的、不是便利：
+ * SQLite 的**内存库永远报告 `journal_mode = memory`**，也设不成 `delete` ——
+ * 在内存库上断言 journal_mode，无论被测代码做什么都会「通过」（或永远失败）。
+ * 「关 WAL」这个承诺只有磁盘库上的 `-wal`/`-shm` 才看得见。
+ */
+export function freshDbWithHandle(file?: string): { db: MedboxDb; sqlite: SqliteHandle } {
+  const sqlite = new Database(file ?? ':memory:');
   const files = readdirSync(DRIZZLE_DIR)
     .filter((f) => f.endsWith('.sql'))
     .sort();
@@ -45,8 +61,11 @@ export function freshDb(): MedboxDb {
   // 外键默认是关的。App 里开（client.ts），这里也要开 ——
   // 否则「事件指向不存在的批次」这类错误在测试里看不见
   sqlite.pragma('foreign_keys = ON');
-  return drizzle(sqlite, { schema }) as unknown as MedboxDb;
+  return { db: drizzle(sqlite, { schema }) as unknown as MedboxDb, sqlite };
 }
+
+/** better-sqlite3 的实例类型 —— 只为了上面那个返回值不要写成 `any`。 */
+export type SqliteHandle = InstanceType<typeof Database>;
 
 /**
  * 造数据用：取刚插入那一行的自增 id。

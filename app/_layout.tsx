@@ -37,6 +37,7 @@ export default function RootLayout() {
           <Stack.Screen name="member/[id]/index" options={{ title: '成员' }} />
           <Stack.Screen name="member/[id]/edit" options={{ title: '编辑成员' }} />
           <Stack.Screen name="import" options={{ title: '导入数据' }} />
+          <Stack.Screen name="export" options={{ title: '导出数据' }} />
         </Stack>
       </DbProvider>
     </SafeAreaProvider>

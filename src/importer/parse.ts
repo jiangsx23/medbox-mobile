@@ -14,7 +14,10 @@ import {
   BATCH_STATUSES,
   DEFAULT_NEAR_EXPIRY_DAYS,
   DEFAULT_RESTOCK_DAYS,
+  EVENT_EDIT,
   EVENT_LABELS,
+  EVENT_MARK_EXPIRED,
+  EVENT_RESTOCK,
   KEY_NEAR_EXPIRY_DAYS,
   KEY_RESTOCK_DAYS,
 } from '../domain/constants';
@@ -23,6 +26,27 @@ import { parseInstant } from '../domain/instant';
 import type { Instant } from '../db/schema';
 
 // ── 解析结果的结构 ─────────────────────────────────────────────────────
+
+/**
+ * 「数量变化为 0」是合法的变动类型。
+ *
+ * `requirements.md` §2.3 的原话是「**仅「编辑」类型可以是 0**」，但那条把
+ * 枚举里两个**按定义就不改数量**的操作漏掉了，而**网页版的代码并不遵守它**：
+ * `../medbox-app/app/routes/batches.py:307,322` 给「标记过期」「恢复在库」
+ * 记的正是 `delta 0`（§2.4 里这两件事本来就只改状态、不动数量）。
+ *
+ * 🔴 照 §2.3 的原文写会同时坏掉两件事，而且都是硬约束级别的：
+ * 1. **导入端会拒绝网页版自己导出的文件** —— 硬约束 5 的双向兼容当场破掉。
+ * 2. **App 自己「标记过期」一次之后，导出会被自己的运行时自检拦住。**
+ *    而 `StockEvent` 只增不改不删（硬约束 2），那条事件永远在 ⇒ **再也没有
+ *    导出的机会**，「能拿走」这个能力被一次点按永久锁死。
+ *
+ * 2026-09-22 由 M6 的「自检不挡路」扫出来（`test/exporter/roundtrip.test.ts` 里
+ * 阶段 5 第 7 项的本地替身）。此前两半各自都有测试、且各自都过：
+ * `test/stock.test.ts:323,346` 钉住「领域层写 0」，这一条钉住「解析端不许 0」——
+ * 两个测试互相矛盾，却谁也照不到对方。
+ */
+const ZERO_DELTA_TYPES: readonly string[] = [EVENT_EDIT, EVENT_MARK_EXPIRED, EVENT_RESTOCK];
 
 export type ParsedMember = {
   oldId: number;
@@ -192,12 +216,14 @@ function asInstant(v: unknown, field: string, c: Collector, where: string): Inst
 }
 
 /** 已知的模型字段名，用来发现「不认识的字段」（§7.2 最后一条） */
-function findUnknownKeys(obj: Record<string, unknown>, known: string[]): string[] {
+function findUnknownKeys(obj: Record<string, unknown>, known: readonly string[]): string[] {
   return Object.keys(obj).filter((k) => !known.includes(k));
 }
 
-const MEMBER_KEYS = ['id', 'name', 'notes', 'created_at'];
-const MEDICINE_KEYS = [
+// 四处白名单导出给 `src/exporter/build.ts` 用：导出端必须**严格**按这些键写，
+// 多一个键将来导入时就多一条「不认识的字段」警告。测试也拿它们比对（`test/exporter/`）。
+export const MEMBER_KEYS: readonly string[] = ['id', 'name', 'notes', 'created_at'];
+export const MEDICINE_KEYS: readonly string[] = [
   'id',
   'generic',
   'brand',
@@ -214,7 +240,7 @@ const MEDICINE_KEYS = [
   'auto_accounted',
   'created_at',
 ];
-const BATCH_KEYS = [
+export const BATCH_KEYS: readonly string[] = [
   'id',
   'medicine_id',
   'owner_id',
@@ -229,7 +255,15 @@ const BATCH_KEYS = [
   'created_at',
   'updated_at',
 ];
-const EVENT_KEYS = ['id', 'batch_id', 'type', 'delta_qty', 'qty_after', 'reason', 'created_at'];
+export const EVENT_KEYS: readonly string[] = [
+  'id',
+  'batch_id',
+  'type',
+  'delta_qty',
+  'qty_after',
+  'reason',
+  'created_at',
+];
 
 // ── 主函数 ─────────────────────────────────────────────────────────────
 
@@ -506,9 +540,8 @@ export function parseExport(text: string, importDay: CalendarDay): ParseResult {
     const qtyAfter = asInt(raw.qty_after);
     if (qtyAfter === null) return c.add(`${where} 的 qty_after 不是整数。`);
     if (qtyAfter < 0) return c.add(`${where} 的 qty_after 不能为负。`);
-    // 只有「编辑」允许 delta 为 0（§2.3）
-    if (deltaQty === 0 && type !== 'edit') {
-      c.add(`${where} 的类型是「${type}」但数量变化为 0，只有「编辑」允许为 0。`);
+    if (deltaQty === 0 && !ZERO_DELTA_TYPES.includes(type)) {
+      c.add(`${where} 的类型是「${type}」但数量变化为 0，只有「编辑」「标记过期」「恢复在库」允许为 0。`);
     }
 
     const createdAt = asInstant(raw.created_at, 'created_at', c, where);
@@ -591,7 +624,7 @@ export function parseExport(text: string, importDay: CalendarDay): ParseResult {
 
 function warnUnknown(
   raw: Record<string, unknown>,
-  known: string[],
+  known: readonly string[],
   where: string,
   warnings: string[],
 ) {

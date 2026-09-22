@@ -96,6 +96,19 @@ export default function SettingsScreen() {
             ? '从网页版导出的 all.json 重新导入。会先清空手机上现有的数据。'
             : '还没有数据。导入网页版导出的 all.json 就能开始用。'}
         </Text>
+
+        <Pressable
+          style={[styles.action, styles.actionDivided]}
+          onPress={() => router.push('/export')}
+        >
+          <Ionicons name="share-outline" size={18} color={color.brand} />
+          <Text style={styles.actionLabel}>导出 / 备份</Text>
+          <Ionicons name="chevron-forward" size={16} color={color.muted} />
+        </Pressable>
+        <Text style={styles.actionHint}>
+          把全部数据导出成 all.json，或者生成一份给人看的在库清单，
+          再通过系统分享面板发到微信 / 邮件 / 文件管理器。不会改动库里的数据。
+        </Text>
       </Card>
 
       <SectionTitle>库里现在有什么</SectionTitle>
@@ -178,6 +191,8 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   content: { padding: space.lg, paddingBottom: space.xl * 3 },
   action: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm },
+  // 同一张卡里第二行往上加一条细线（与首页/详情页的分隔线同一套做法）
+  actionDivided: { borderTopWidth: 1, borderTopColor: color.lineSoft, marginTop: space.sm },
   actionLabel: { flex: 1, fontSize: font.base, fontWeight: '700', color: color.ink },
   actionHint: { fontSize: font.tiny, color: color.muted, lineHeight: 17, marginTop: space.xs },
   tip: { fontSize: font.tiny, color: color.muted, marginTop: space.sm, lineHeight: 17 },

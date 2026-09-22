@@ -16,6 +16,7 @@ import { eq } from 'drizzle-orm';
 import type { MedboxDb } from '../db/client';
 import type { Instant } from '../db/schema';
 import { batches, members, medicines, settings, stockEvents } from '../db/schema';
+import { insertedId } from '../data/stock';
 import { KEY_NEAR_EXPIRY_DAYS, KEY_RESTOCK_DAYS } from '../domain/constants';
 import type { ParsedImport } from './parse';
 
@@ -63,7 +64,7 @@ export function applyImport(db: MedboxDb, data: ParsedImport, opts: ApplyOptions
         .insert(members)
         .values({ name: m.name, notes: m.notes, createdAt: m.createdAt })
         .run();
-      memberIdMap.set(m.oldId, Number(res.lastInsertRowId));
+      memberIdMap.set(m.oldId, insertedId(res));
     }
 
     // ── 药品档案 ──────────────────────────────────────────────────
@@ -89,7 +90,7 @@ export function applyImport(db: MedboxDb, data: ParsedImport, opts: ApplyOptions
           createdAt: m.createdAt,
         })
         .run();
-      medicineIdMap.set(m.oldId, Number(res.lastInsertRowId));
+      medicineIdMap.set(m.oldId, insertedId(res));
     }
 
     // ── 批次 ──────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ export function applyImport(db: MedboxDb, data: ParsedImport, opts: ApplyOptions
           updatedAt: b.updatedAt,
         })
         .run();
-      batchIdMap.set(b.oldId, Number(res.lastInsertRowId));
+      batchIdMap.set(b.oldId, insertedId(res));
     }
 
     // ── 变动记录。🟢 坑 7：**不补造**「入库」记录去填那 38 条空时间线 ──

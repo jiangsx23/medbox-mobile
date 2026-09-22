@@ -367,17 +367,29 @@ describe('不变量：坏状态/坏数量必须被挡下', () => {
     expect(r.ok).toBe(false);
   });
 
-  it('只有「编辑」允许 delta_qty 为 0', () => {
+  // 🔴 这三类允许 delta 为 0，其余一律拒绝。
+  //
+  // `requirements.md` §2.3 说的是「仅「编辑」可以是 0」，但那是**文档跟不上代码**：
+  // 网页版 `batches.py:307,322` 给「标记过期」「恢复在库」记的就是 0，而这两件事
+  // 按 §2.4 本来就不改数量。曾经照 §2.3 原文实现过，后果是 App 自己
+  // 「标记过期」一次之后导出就被自检拦住 —— 而事件只增不改，等于**永久**导不出。
+  it('「编辑」「标记过期」「恢复在库」允许 delta_qty 为 0', () => {
+    for (const type of ['edit', 'mark_expired', 'restock']) {
+      const r = mutate((doc) => {
+        doc.stock_events[0].type = type;
+        doc.stock_events[0].delta_qty = 0;
+      });
+      expect([type, r.ok]).toEqual([type, true]);
+    }
+  });
+
+  it('其余的变动类型 delta_qty 为 0 → 拒绝（自动扣减扣 0 片是坏数据）', () => {
     const bad = mutate((doc) => {
-      doc.stock_events[0].delta_qty = 0;
+      doc.stock_events[0].delta_qty = 0; // 原本是 auto_take
     });
     expect(bad.ok).toBe(false);
-
-    const okEdit = mutate((doc) => {
-      doc.stock_events[0].type = 'edit';
-      doc.stock_events[0].delta_qty = 0;
-    });
-    expect(okEdit.ok).toBe(true);
+    if (bad.ok) return;
+    expect(bad.errors.join(' ')).toContain('数量变化为 0');
   });
 });
 

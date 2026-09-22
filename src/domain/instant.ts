@@ -66,6 +66,24 @@ export function toNaiveUtcString(ms: number): string {
 }
 
 /**
+ * epoch 毫秒 → **本地** naive 字符串 `'YYYY-MM-DDTHH:mm:ss'`。
+ *
+ * **只给 `exported_at` 一个字段用。** 网页版那一格是 `datetime.now().isoformat()`,
+ * 写的是本地时间 naive —— 与 `created_at` 的 UTC 口径**相反**，而文件里两者
+ * 都没有时区标记（DESIGN.md §6.2 那颗雷的形状）。导入端读了就丢
+ * （`src/importer/parse.ts:270`），但写出去的值必须和它标称的语义一致：
+ * 往本地时间的格子里塞 UTC，等于**故意**在导出方向重现同一颗雷。
+ */
+export function toLocalNaiveString(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return (
+    `${p(d.getFullYear(), 4)}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  );
+}
+
+/**
  * epoch 毫秒 → 设备本地的 `'YYYY-MM-DD HH:mm'`，给时间线展示用。
  * 用本地分量，因为用户看的是自己手表上的时间（§2.6 规则 4）。
  */

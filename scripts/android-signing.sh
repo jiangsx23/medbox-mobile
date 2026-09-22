@@ -99,10 +99,42 @@ else:
 PY
 fi
 
-# ── 2. 自检 ────────────────────────────────────────────────────────────
+# ── 2. android/local.properties（SDK 路径）──────────────────────────────
+# 和签名配置是同一类问题：`android/` 被 prebuild 整个删掉时，这个文件一起没，
+# 而 gradle 找不到 SDK 会**当场失败**：
+#   SDK location not found. Define a valid SDK location with an ANDROID_HOME
+#   environment variable or by setting the sdk.dir path in your project's
+#   local properties file at '…/android/local.properties'.
+# 2026-09-21 实测踩到：prebuild 之后直接 gradle，报的就是这条。
+#
+# 写进这个文件比靠 ANDROID_HOME 可靠 —— 环境变量在**每个新终端**都要重设，
+# 漏掉就复现这个错；local.properties 是落到盘上的，重开终端也还在。
+LP="$ROOT/android/local.properties"
+SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [ -z "$SDK" ] && [ -d /d/Android/Sdk ]; then
+  SDK="/d/Android/Sdk"          # 本机默认位置（见 AGENTS.md「构建配置」）
+fi
+
+if [ -z "$SDK" ]; then
+  echo "!! 找不到 Android SDK：ANDROID_HOME / ANDROID_SDK_ROOT 都没设，/d/Android/Sdk 也不存在"
+  echo "   先 export ANDROID_HOME=/d/Android/Sdk 再跑这个脚本"
+  exit 1
+fi
+
+# Java 的 properties 里反斜杠是转义符，一律写成正斜杠（gradle 两种都认）
+SDK_WIN="$(printf '%s' "$SDK" | sed 's|\\|/|g')"
+if [ -f "$LP" ] && grep -qxF "sdk.dir=$SDK_WIN" "$LP"; then
+  echo "local.properties 已正确，跳过"
+else
+  echo "写入 android/local.properties（sdk.dir=$SDK_WIN）…"
+  printf 'sdk.dir=%s\n' "$SDK_WIN" > "$LP"
+fi
+
+# ── 3. 自检 ────────────────────────────────────────────────────────────
 echo
 echo "--- 自检 ---"
 grep -n "medbox-release.keystore\|signingConfig signingConfigs" "$GRADLE" || true
 grep -n "abiFilters" "$GRADLE" || true
+grep -n "^sdk.dir=" "$LP" || true
 echo
 echo "OK。接着跑： cd android && ./gradlew assembleRelease"

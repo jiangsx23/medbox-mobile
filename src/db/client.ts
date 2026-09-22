@@ -92,5 +92,12 @@ export function isWalDisabled(journalMode: string): boolean {
   return journalMode !== 'wal';
 }
 
-/** 附属文件后缀，供备份逻辑检查（M6 用）。 */
+/**
+ * 附属文件后缀（`-wal` / `-shm`），供**整库拷文件**式的备份检查用。
+ *
+ * ⚠️ M6 的导出**不用它**：那条路是「查询 → 生成 JSON」，产出的是一份新文件，
+ * 跟 `medbox.db` 旁边有没有 `-wal` 无关 —— 真去 stat 等于去检查别人的文件。
+ * 留在这里是给「把 medbox.db 当文件拷走」那种备份方式用的。
+ * 硬约束 6（导出路径绝不写库）由 `test/exporter/roundtrip.test.ts` 的静态守卫钉住，比 stat 附属文件强。
+ */
 export const WAL_SUFFIXES = WAL_SIDECARS;
