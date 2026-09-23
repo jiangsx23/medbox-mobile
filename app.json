@@ -14,7 +14,7 @@
     "android": {
       "package": "com.medbox.family",
       "adaptiveIcon": {
-        "backgroundColor": "#F7F3EC",
+        "backgroundColor": "#dcebe4",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -48,7 +48,7 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/android-icon-monochrome.png",
+          "icon": "./assets/notification-icon.png",
           "color": "#0e6e55",
           "defaultChannel": "medbox-reminders"
         }

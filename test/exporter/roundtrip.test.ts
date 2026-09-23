@@ -11,6 +11,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { eq } from 'drizzle-orm';
+
 import { applyImport } from '../../src/importer/apply';
 import { parseExport } from '../../src/importer/parse';
 import { buildExport } from '../../src/exporter/build';
@@ -452,12 +454,22 @@ describe('阶段 5 第 7 项的本地替身：八种界面操作之后，自检�
     expect(mustExport(db).notices).toEqual([]);
   });
 
-  it('取用（把一盒取空）→ 通过，且**恰好**一条归一化提示点名那一盒', () => {
+  it('取用（把一盒取空）→ 通过，且**不需要**归一化（领域层直接转成「已用完」）', () => {
+    // 🔴 §9 第 11 项 2026-09-23 修的。**这条用例以前是反过来的** ——
+    // 它断言「恰好一条归一化提示点名那一盒」，也就是把 bug 的症状当成了规格：
+    // `planTake` 当时只减数量、不动状态，于是「在库 + 0」这种**不变量 4 明确拒绝**的行
+    // 由 App 自己的日常操作造出来，只能靠导出端的归一化兜着。
+    // 现在取空即转 `used_up`，这条路径上归一化成了死代码 —— 但**它必须留着**，
+    // 存量数据仍需要它（下一个用例）。
     const { db, plainBox } = stage();
     const box = plainBox(1);
     expect(take(db, box.id, String(box.qty), '', DAY, NOW2).ok).toBe(true);
-    const built = mustExport(db);
-    expect(built.notices.map((n) => n.batchId)).toEqual([box.id]);
+
+    expect(mustExport(db).notices).toEqual([]);
+    // 库里也真的转了状态，不只是导出时看着对
+    const row = db.select().from(batches).all().find((b) => b.id === box.id);
+    expect(row?.status).toBe(BATCH_USED_UP);
+    expect(row?.qty).toBe(0);
   });
 
   it('用完 → 通过，且不该归一化（数量已归 0，状态本就合法）', () => {
@@ -587,13 +599,19 @@ describe('阶段 5 第 7 项的本地替身：八种界面操作之后，自检�
     expect(res.errors._).toContain('大于 0');
   });
 
-  it('真机 item 5 那个状态：库里留着「在库 + 0」，导出**归一化而不是拒绝**', () => {
-    // 2026-09-22 在真机上验过同一件事（阿奇霉素 · 第 #34 盒）：取空之后
-    // 库里的 status 仍是 in_stock，界面照样显示「0 袋 · 正常」，导出时必须
-    // 改成 used_up 才导得回来 —— 而库那一行**一个字节都没动**。
+  it('真机 item 5 那个状态（存量数据）：库里留着「在库 + 0」，导出**归一化而不是拒绝**', () => {
+    // 2026-09-22 在真机上见过这个状态（阿奇霉素 · 第 #34 盒）：取空之后
+    // 库里的 status 仍是 in_stock，界面照样显示「0 袋 · 正常」。
+    //
+    // ⚠️ 2026-09-23 起，这个状态**日常操作已经造不出来了**（`planTake` 取空即转
+    // `used_up`，见上一个用例）。但归一化**必须保留**，两条理由：
+    //   ① 存量数据里可能已经有了 —— 改了 `planTake` 也**去不掉库里已经存在的行**
+    //      （账本只增，硬约束 2），所以导出端是这些行的唯一出路；
+    //   ② 手改过 / 别的工具写过的库同样会带进来。
+    // 所以这里**直接写库、绕过领域层** —— 那才是存量数据真正的样子。
     const { db, plainBox } = stage();
     const box = plainBox(1);
-    expect(take(db, box.id, String(box.qty), '', DAY, NOW2).ok).toBe(true);
+    db.update(batches).set({ qty: 0, status: BATCH_IN_STOCK }).where(eq(batches.id, box.id)).run();
 
     const built = mustExport(db);
     expect(built.notices).toHaveLength(1);

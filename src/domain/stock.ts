@@ -304,7 +304,16 @@ export function planTake(
 
   const plan: Plan = { patches: [], events: [] };
   const qtyAfter = batch.qty - amount;
-  pushPatch(plan, batch.id, { qty: qtyAfter });
+  const patch: BatchPatch = { qty: qtyAfter };
+  // 🔴 取空 ⇒ **一并转「已用完」**。不转的话库里就留下 `in_stock` + `qty 0` 的**幽灵药盒**：
+  //    界面上多一盒「在库 0 片」，更要命的是这个状态**自己导不出去**
+  //    —— `parse.ts` 的不变量 4 明确拒绝「状态在库但数量是 0」，
+  //    于是用户点一次「刚好取完」，备份能力就被自己的数据锁住了（账本只增，那条事件删不掉）。
+  //    与 `planEdit`（见下）和结算对齐；`planUsedUp` 走的是另一条路（整盒归零）。
+  // ⚠️ 只在取空时写 status，其余情况不写 —— 免得每次取用都多写一个没变的字段。
+  //    这里**不存在** `planEdit` 那种「两处写同一行」的顾虑：`afterTake` 只回账本字段，不 patch 批次。
+  if (qtyAfter === 0) patch.status = BATCH_USED_UP;
+  pushPatch(plan, batch.id, patch);
   plan.events.push({
     batchId: batch.id,
     type: EVENT_TAKE,
@@ -471,7 +480,14 @@ export function planEdit(
   const openedAt = parseOptionalDay(form.openedAt);
   if (openedAt === null) errors.openedAt = '拆封日期：格式应为 2026-09-15';
   const openLifeDays = parseOptionalInt(form.openLifeDays);
+  // 🔴 `<= 0` 必须挡在这里，和 `planIntake` 逐字对齐。漏了它的后果不是「存了个怪值」，
+  //    而是**这份数据自己导不出去**：`parse.ts` 明确拒绝 `open_life_days <= 0`
+  //    （「开封后有效期必须 > 0」），而账本只增 ⇒ 那条编辑事件删不掉 ⇒ 备份被自己的数据锁住。
+  //    §9 第 11 项记的就是这个缺口（M6 那个 delta 0 的 bug 是同一形状的第二次）。
   if (openLifeDays === null) errors.openLifeDays = '开封后天数：请填整数';
+  else if (openLifeDays !== undefined && openLifeDays <= 0) {
+    errors.openLifeDays = '开封后天数：请填大于 0 的整数';
+  }
 
   const ownerRaw = (form.ownerId ?? '').trim();
   let ownerId: number | null = null;

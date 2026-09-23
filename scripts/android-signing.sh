@@ -22,6 +22,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRADLE="$ROOT/android/app/build.gradle"
 KS="$ROOT/keys/medbox-release.keystore"
 
+# 🔴 同一个目录的 **Windows 写法**（`D:/…`），专供交给 python 用。
+#    下面那两个改文件的 python 是**原生程序**：平时 MSYS 会自动把参数里的
+#    `/d/…` 转成 `D:\…`，**但 `MSYS_NO_PATHCONV=1` 时不会** —— 而 AGENTS.md
+#    教人用 adb 时第一步就是 `export MSYS_NO_PATHCONV=1`，同一个终端接着跑本脚本
+#    是很自然的操作。**2026-09-23 实测踩到**：python 拿到 `/d/Documents/…`
+#    直接 `FileNotFoundError`，`set -e` 让脚本当场退出。
+#    ⚠️ 这个失败**只影响签名那一段**，非常容易被当成噪音略过，后果是打出一个
+#    用 `debug.keystore` 签名的包 —— 装不上已装的 App（签名不符），白等 20 分钟。
+#    所以不依赖那个自动转换，自己用 bash 内建的 `pwd -W` 取 Windows 形式。
+ROOT_WIN="$( (cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -W) 2>/dev/null || printf '%s' "$ROOT")"
+GRADLE_PY="$ROOT_WIN/android/app/build.gradle"
+
 if [ ! -f "$GRADLE" ]; then
   echo "!! 找不到 $GRADLE —— 先跑 npx expo prebuild --platform android"
   exit 1
@@ -44,7 +56,9 @@ else
   cp "$GRADLE" "$GRADLE.orig"
 
   # 1a. 在 signingConfigs 里加一块 release，指向 keys/
-  python - "$GRADLE" <<'PY'
+  # PYTHONIOENCODING：不设的话 python 按本地代码页输出，中文在这台机器上是乱码
+  # （`已写入` 显示成 `��д��`），看着像脚本坏了。见 windows-cmd-encoding-936。
+  PYTHONIOENCODING=utf-8 python - "$GRADLE_PY" <<'PY'
 import io, re, sys
 gradle = sys.argv[1]
 src = io.open(gradle, encoding='utf-8').read()
@@ -77,7 +91,9 @@ PY
 
   # 1c. ABI 只要两种 ARM（CLAUDE.md 定的 universal APK），顺手把 x86 去掉，
   #     安装包小一半左右。放在 defaultConfig 里。
-  python - "$GRADLE" <<'PY'
+  # PYTHONIOENCODING：不设的话 python 按本地代码页输出，中文在这台机器上是乱码
+  # （`已写入` 显示成 `��д��`），看着像脚本坏了。见 windows-cmd-encoding-936。
+  PYTHONIOENCODING=utf-8 python - "$GRADLE_PY" <<'PY'
 import io, re, sys
 gradle = sys.argv[1]
 src = io.open(gradle, encoding='utf-8').read()

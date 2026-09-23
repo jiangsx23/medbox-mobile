@@ -27,6 +27,9 @@ export default function RootLayout() {
           }}
         >
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          {/* 药品列表：药箱 tab 上每张统计卡 / 每个过滤项都落到这里。
+              标题由这一页自己按当前筛选覆盖（「快过期」「需补货」…），这行只是兜底 */}
+          <Stack.Screen name="stock" options={{ title: '在库药品' }} />
           <Stack.Screen name="medicine/[id]/index" options={{ title: '药品详情' }} />
           {/* 标题由各页自己用 <Stack.Screen options> 覆盖 —— 入库页要带药名 */}
           <Stack.Screen name="medicine/new" options={{ title: '新建药品' }} />

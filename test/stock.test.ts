@@ -237,6 +237,23 @@ describe('取用', () => {
     expect(finalQty(plan, 10, 20)).toBe(0);
   });
 
+  it('🔴 刚好取完 ⇒ 状态一并转「已用完」（不转就留下导不出去的幽灵药盒）', () => {
+    // §9 第 11 项，2026-09-23 修。以前这里只写 `{ qty: 0 }`，于是库里留下
+    // 「在库 + 数量 0」—— 而 `parse.ts` 的**不变量 4 明确拒绝**这种行
+    //（界面上的表现是多一盒「在库 0 片」，代价是**这份数据自己导不出去**：
+    //  账本只增，那条事件删不掉 ⇒ 点一次「刚好取完」就把备份能力锁住了）。
+    const plan = planOf(planTake(ctx(medicine()), batch({ qty: 20 }), '20', ''));
+    expect(plan.patches).toEqual([{ id: 10, patch: { qty: 0, status: BATCH_USED_UP } }]);
+    expect(plan.events[0]).toMatchObject({ type: EVENT_TAKE, deltaQty: -20, qtyAfter: 0 });
+  });
+
+  it('没取空就**不写** status —— 免得每次取用都多写一个没变的字段', () => {
+    // 上一条的反面。补这一条是因为「顺手总是写 status」也能让所有测试变绿，
+    // 但那会让每一次日常取用都多带一个无意义的写入。
+    const plan = planOf(planTake(ctx(medicine()), batch({ qty: 20 }), '19', ''));
+    expect(plan.patches).toEqual([{ id: 10, patch: { qty: 1 } }]);
+  });
+
   it('数量必须是大于 0 的整数', () => {
     for (const amount of ['0', '-1', 'x', '']) {
       expect(errorsOf(planTake(ctx(medicine()), batch(), amount, '')).amount).toBeDefined();
@@ -463,6 +480,21 @@ describe('编辑纠错', () => {
   it('数量负数不行，但 0 行', () => {
     expect(errorsOf(planEdit(ctx(medicine()), batch(), editForm({ qty: '-1' }))).qty).toBeDefined();
     expect(planOf(planEdit(ctx(medicine()), batch(), editForm({ qty: '0' }))).patches.length).toBe(1);
+  });
+
+  it('🔴 「开封后天数」必须大于 0 —— 0 和负数都得挡（和入库逐字对齐）', () => {
+    // §9 第 11 项，2026-09-23 修。以前这里只挡「非整数」，于是 `0` 和 `-1` 都放得进去。
+    // 后果不是「存了个怪值」：`parse.ts` **明确拒绝** `open_life_days <= 0`
+    //（「开封后有效期必须 > 0」），而账本只增 ⇒ 那条编辑事件删不掉
+    // ⇒ **这份数据自己再也导不出去**。入库那边一直是对的，只有编辑漏了。
+    for (const days of ['0', '-1', 'abc', '1.5']) {
+      expect(errorsOf(planEdit(ctx(medicine()), batch(), editForm({ openLifeDays: days }))).openLifeDays).toBeDefined();
+    }
+    // 边界正面：1 是允许的，留空也是允许的（表示不按开封算）
+    expect(planOf(planEdit(ctx(medicine()), batch(), editForm({ openLifeDays: '1' }))).patches).toHaveLength(1);
+    expect(errorsOf(planEdit(ctx(medicine()), batch(), editForm({ qty: '-1', openLifeDays: '0' }))).qty).toBeDefined();
+    // 留空 = 不填，是合法输入（`undefined` 与批次上的 `null` 视为没改 ⇒ 不写事件）
+    expect(eventsOf(planOf(planEdit(ctx(medicine()), batch(), editForm({ openLifeDays: '' }))), 10)).toHaveLength(0);
   });
 });
 
