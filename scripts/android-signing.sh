@@ -16,6 +16,19 @@
 #
 # 所以签名密钥放在 `keys/`（不在 android/ 里，prebuild 不会碰），
 # 再用这个脚本把生成的 build.gradle 重新指过去。
+#
+# ── 口令放哪（2026-09-23 开源时挪的）───────────────────────────────────
+# 🔴 **口令不进仓库。** 它写在 `keys/keystore.properties`，而 `keys/` 已在 .gitignore 里：
+#
+#     storePassword=…
+#     keyPassword=…
+#
+# 原先是硬编码在本文件里的 —— 而本文件被 git 跟踪，**准备开源之后那条理由不成立了**：
+# 密钥 + 口令一起公开 = 任何人都能签出一个可覆盖安装、并且能读到那个数据库的「新版本」，
+# 等于把「数据只在手机本地」这条承诺作废。所以现在从文件读。
+#
+# 为什么用文件而不是环境变量：环境变量在**每个新终端**都要重设，漏掉就复现「读不到口令」；
+# 落到盘上的文件重开终端也还在 —— 与下面 local.properties 是同一个理由。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,9 +56,39 @@ if [ ! -f "$KS" ]; then
   echo "   重新生成一把（注意：新密钥签的包装不进已装的旧 App，必须卸载重装，数据会丢）："
   echo "   keytool -genkeypair -v -storetype PKCS12 -keystore keys/medbox-release.keystore \\"
   echo "     -alias medbox -keyalg RSA -keysize 2048 -validity 10000 \\"
-  echo "     -storepass REDACTED -keypass REDACTED -dname \"CN=medbox, OU=family, O=medbox, C=CN\""
+  echo "     -dname \"CN=medbox, OU=family, O=medbox, C=CN\""
+  echo "   ↑ 口令由 keytool 交互式问，这里刻意不写 -storepass —— 写了口令就回到本文件里了"
+  echo "     问完把口令填进 keys/keystore.properties（见文件头「口令放哪」）"
   exit 1
 fi
+
+# ── 0. 口令 ────────────────────────────────────────────────────────────
+KSP="$ROOT/keys/keystore.properties"
+if [ ! -f "$KSP" ]; then
+  echo "!! 找不到 $KSP"
+  echo "   里面放你自己的签名口令（这个文件不进仓库），两行："
+  echo "     storePassword=<口令>"
+  echo "     keyPassword=<口令>"
+  exit 1
+fi
+
+# 取一个键的值。`tr -d '\r'` 是为了容忍 CRLF 存盘 —— 这台机器上 Git 会把文本转成 CRLF，
+# 不管的话口令尾巴上会多一个 \r，gradle 报的是「keystore password was incorrect」，
+# 读起来像口令错、其实是多了一个字节。
+read_prop() {
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$KSP" | tr -d '\r' | tail -1
+}
+STOREPASS="$(read_prop storePassword)"
+KEYPASS="$(read_prop keyPassword)"
+if [ -z "$KEYPASS" ]; then
+  KEYPASS="$STOREPASS"        # PKCS12 本来也只认一个口令，只写一行是常见情形
+fi
+if [ -z "$STOREPASS" ]; then
+  echo "!! $KSP 里没读到 storePassword"
+  exit 1
+fi
+# 走环境变量交给下面的 python，**不进 argv** —— argv 在 `ps` 里别人看得见
+export STOREPASS KEYPASS
 
 # ── 1. 签名配置 ────────────────────────────────────────────────────────
 # 用 .bak 判断「是否已经改过」不够可靠（二次 prebuild 会重置），所以直接查标记行。
@@ -59,21 +102,35 @@ else
   # PYTHONIOENCODING：不设的话 python 按本地代码页输出，中文在这台机器上是乱码
   # （`已写入` 显示成 `��д��`），看着像脚本坏了。见 windows-cmd-encoding-936。
   PYTHONIOENCODING=utf-8 python - "$GRADLE_PY" <<'PY'
-import io, re, sys
+import io, os, re, sys
 gradle = sys.argv[1]
 src = io.open(gradle, encoding='utf-8').read()
+
+# 口令从环境变量来 —— 源头是 keys/keystore.properties，那个文件不进仓库（见脚本文件头）。
+# 走环境变量而不是 argv：argv 在 `ps` 里别人看得见。
+storepass = os.environ['STOREPASS']
+keypass = os.environ['KEYPASS']
+
+# 自检：口令里若有引号或反斜杠，下面 %s 把它插进 gradle 会把字符串截断，
+# 生成的 build.gradle 语法就坏了 —— 而报错是 gradle 那边的
+# 「Could not compile build file」，看不出跟口令有关。当场拦下。
+for _name in ('STOREPASS', 'KEYPASS'):
+    _v = os.environ[_name]
+    assert '"' not in _v and '\\' not in _v, \
+        '%s 里有引号或反斜杠，会让生成的 build.gradle 变形' % _name
 
 anchor = "signingConfigs {"
 block = """signingConfigs {
         release {
-            // 指向仓库里的 keys/，不在 android/ 内，prebuild 不会碰它。
+            // 指向 keys/（已 gitignore），不在 android/ 内，prebuild 不会碰它。
+            // 口令由 scripts/android-signing.sh 从 keys/keystore.properties 注入。
             // 换掉这把密钥 = 已装的 App 无法覆盖升级，必须卸载重装 = 数据全丢。
             storeFile file("%s")
             storePassword "%s"
             keyAlias "%s"
             keyPassword "%s"
         }
-""" % ('../../keys/medbox-release.keystore', 'REDACTED', 'medbox', 'REDACTED')
+""" % ('../../keys/medbox-release.keystore', storepass, 'medbox', keypass)
 
 assert src.count(anchor) == 1, "signingConfigs 出现次数不是 1，生成的模板可能变了"
 src = src.replace(anchor, block, 1)
