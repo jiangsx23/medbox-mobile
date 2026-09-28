@@ -518,6 +518,19 @@ SharedPreferences（「我们请求过什么」），**重启后它照样报「3
   本来打算「fixture 留着、只删文档里的药名叙述」，核对后发现**收益接近零** ——
   文档里的每一条都是从 fixture 照抄的，fixture 是超集 ⇒ 文档一个字没改。
 
+- **开源收尾第三笔：skills 包不进仓库**（2026-09-28）：`git add -A` 把当天刚落到工作区的
+  整套 Expo 官方 agent skills（`.agents/skills/**` 1.2M + `.claude/skills/**` 符号链接
+  + `skills-lock.json`）扫进了一个**提交信息写着「本轮只改 `.md`」**的提交 ——
+  实际改了 **273 个文件 / +39105 行**。
+  🔴 **成因是工具的默认行为，不是手感**：`git add -A` 会带上**所有未跟踪文件**，
+  而「我只改了两个文件」是拿 `git diff` 看出来的结论 —— **它看不见未跟踪文件**。
+  已 `git reset --mixed` 回退重做（无 remote，代价为零），并**根治**：
+  `.agents/` 与 `.claude/skills/` 进 `.gitignore`，**只提交 `skills-lock.json`**
+  （26 个 skill 的来源 / 路径 / 内容哈希 ⇒ 可复现安装，等于 `package.json` 进仓库、
+  `node_modules` 不进）。
+  ⚠️ `.claude/skills/` 必须忽略：它是**符号链接**，git 当普通文件存 ⇒ 同一份内容占两遍地方。
+  ⇒ **给仓库加 `.gitignore` 不是洁癖，是让 `git add -A` 重新变得可信。** 见 DESIGN.md §8.11。
+
 
 `tsc` 干净、**390 条测试全过**（**M5 那次出包时的数**，现在是 415）。**含 M5 的新 APK 已出、已验签、已装到手机**
 （`android/app/build/outputs/apk/release/app-release.apk`，**62682503 字节，2026-09-22 13:53**；
